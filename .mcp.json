@@ -3,6 +3,15 @@
     "prd-agent-launcher": {
       "command": "node",
       "args": ["./mcp/agents-launcher/index.js"]
+    },
+    "prd-agent-tools": {
+      "command": "node",
+      "args": ["./mcp/prd-agent-tools/index.js"],
+      "env": {
+        "PRD_AGENT_BACKEND_URL": "http://localhost:5000",
+        "PRD_AGENT_ANALYST_URL": "http://localhost:3040",
+        "PRD_AGENT_LLM_PROVIDER": "auto"
+      }
     }
   }
 }

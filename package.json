@@ -24,7 +24,10 @@
     "dev": "concurrently -n backend,frontend -c blue,green \"npm run start:backend\" \"BROWSER=none DANGEROUSLY_DISABLE_HOST_CHECK=true npm start\"",
     "dev:analyst": "env-cmd -f .env -- npm run dev --prefix Query_Agent",
     "build:analyst": "env-cmd -f .env -- npm run build --prefix Query_Agent",
-    "start:analyst": "env-cmd -f .env -- npm run start --prefix Query_Agent"
+    "start:analyst": "env-cmd -f .env -- npm run start --prefix Query_Agent",
+    "dev:alpha": "npm run dev --prefix alpha-web-ui",
+    "build:alpha": "npm run build --prefix alpha-web-ui",
+    "start:alpha": "npm run start --prefix alpha-web-ui"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

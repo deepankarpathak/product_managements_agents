@@ -157,6 +157,30 @@ async function startAnalystStack(root) {
   return { ok: true, started: true, pid, repoRoot: root, logFile };
 }
 
+async function startAlphaStack(root) {
+  const alphaDir = path.join(root, "alpha-web-ui");
+  if (!fs.existsSync(alphaDir)) {
+    return {
+      ok: false,
+      error: "alpha-web-ui directory not found. Run the sync from Google Drive first.",
+      repoRoot: root,
+    };
+  }
+  const logDir = ensureLogDir(root);
+  const logFile = path.join(logDir, "alpha-dev.log");
+  if (!forceStart() && (await portOpen(3050))) {
+    return {
+      ok: true,
+      started: false,
+      repoRoot: root,
+      logFile,
+      note: "Port 3050 already listening; skipped npm run dev:alpha. Set PRD_AGENT_FORCE_START=1 to spawn anyway.",
+    };
+  }
+  const pid = npmDetached(root, ["run", "dev:alpha"], logFile);
+  return { ok: true, started: true, pid, repoRoot: root, logFile };
+}
+
 const MCP_HOME = process.env.MCP_HOME?.trim() || "/Users/deepankarpathak/dev/mcp";
 const MCP_SERVERS = [
   { name: "kb-mcp-server",          cmd: "node",    args: [`${MCP_HOME}/kb-mcp-server/src/index.js`],          log: "mcp-kb.log" },
@@ -196,27 +220,31 @@ server.tool(
     const root = resolveRepoRoot();
     const main = await startMainStack(root);
     const analyst = await startAnalystStack(root);
+    const alpha = await startAlphaStack(root);
     const mcpServers = await startMcps(root);
     const mainUrl = process.env.PRD_AGENT_MAIN_URL?.trim() || "http://localhost:3000";
     const analystUrl = process.env.REACT_APP_ANALYST_AGENT_URL?.trim() || "http://localhost:3040";
+    const alphaUrl = process.env.REACT_APP_ALPHA_AGENT_URL?.trim() || "http://localhost:3050";
 
     openUrlInBrowser(mainUrl);
     setTimeout(() => openUrlInBrowser(analystUrl), 400);
+    setTimeout(() => openUrlInBrowser(alphaUrl), 800);
 
     const terminal = openLiveLogTerminal(root);
 
     const payload = {
-      ok: analyst.ok !== false && main.ok !== false,
+      ok: analyst.ok !== false && main.ok !== false && alpha.ok !== false,
       mainStack: main,
       analystStack: analyst,
+      alphaStack: alpha,
       mcpServers,
-      browserOpened: [mainUrl, analystUrl],
+      browserOpened: [mainUrl, analystUrl, alphaUrl],
       terminal,
       tips: [
         "Wait a few seconds for dev servers to bind ports; refresh browser if needed.",
         "API traffic: lines prefixed [api] (Express) and [analyst-api] (Next) appear in the tail window / log files.",
         "Disable HTTP request logs: PRD_AGENT_HTTP_LOG=0 on backend env or Query_Agent.",
-        "Alpha Agent is the α tab in the main UI at http://localhost:3000",
+        "Alpha Agent: http://localhost:3050 (also embedded as α tab in main UI)",
         "MCP server logs: .claude/mcp-kb.log, mcp-redash.log, mcp-prometheus.log, mcp-superset.log",
       ],
     };
@@ -278,14 +306,39 @@ server.tool(
 );
 
 server.tool(
+  "startalpha",
+  "Starts Alpha Agent web-ui (npm run dev:alpha — Next.js :3050). Skips if port up unless PRD_AGENT_FORCE_START=1. Logs: .claude/alpha-dev.log.",
+  async () => {
+    const root = resolveRepoRoot();
+    const result = await startAlphaStack(root);
+    if (!result.ok) {
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        isError: true,
+      };
+    }
+    const alphaUrl = process.env.REACT_APP_ALPHA_AGENT_URL?.trim() || "http://localhost:3050";
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ ...result, iframeUrl: alphaUrl }, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
   "agents_status",
   "Checks whether default ports are accepting TCP connections: 3000 (main React), 5000 (API), 3040 (Analyst Next.js).",
   async () => {
-    const [p3000, p5000, p3040] = await Promise.all([portOpen(3000), portOpen(5000), portOpen(3040)]);
+    const [p3000, p5000, p3040, p3050] = await Promise.all([portOpen(3000), portOpen(5000), portOpen(3040), portOpen(3050)]);
     const body = {
       mainReact: { port: 3000, listening: p3000 },
       mainApi: { port: 5000, listening: p5000 },
       analystNext: { port: 3040, listening: p3040 },
+      alphaNext: { port: 3050, listening: p3050 },
       repoRoot: resolveRepoRoot(),
       mcpServers: MCP_SERVERS.map(s => {
         const logFile = path.join(ensureLogDir(resolveRepoRoot()), s.log);

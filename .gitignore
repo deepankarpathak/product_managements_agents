@@ -3,6 +3,8 @@
 # dependencies
 /node_modules
 /mcp/agents-launcher/node_modules
+/mcp/prd-agent-tools/node_modules
+**/.google_token.json
 /.pnp
 .pnp.js
 /build

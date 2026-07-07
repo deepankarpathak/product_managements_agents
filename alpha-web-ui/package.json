@@ -1,0 +1,32 @@
+{
+  "name": "upi-alpha-web-ui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 3050",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1 -p 3050",
+    "lint": "next lint",
+    "google:auth": "node scripts/google-auth.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "googleapis": "^173.0.0",
+    "lucide-react": "0.469.0",
+    "next": "15.1.6",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-markdown": "9.0.1",
+    "rehype-highlight": "7.0.1",
+    "rehype-raw": "7.0.0",
+    "remark-gfm": "4.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.0",
+    "@types/node": "22.10.7",
+    "@types/react": "19.0.7",
+    "@types/react-dom": "19.0.3",
+    "tailwindcss": "4.3.0",
+    "typescript": "5.7.3"
+  }
+}

@@ -1,0 +1,434 @@
+@import "tailwindcss";
+@import "highlight.js/styles/github.css";
+
+@theme {
+  --color-ink-50: #f5f7fb;
+  --color-ink-100: #e9eef6;
+  --color-ink-200: #cfd9e8;
+  --color-ink-300: #a9b8d0;
+  --color-ink-400: #7286a8;
+  --color-ink-500: #4d6184;
+  --color-ink-600: #364a6b;
+  --color-ink-700: #25344f;
+  --color-ink-800: #18243a;
+  --color-ink-900: #0d1626;
+
+  --color-brand-50: #e6f9ff;
+  --color-brand-100: #c4f0ff;
+  --color-brand-200: #8ce3ff;
+  --color-brand-300: #4fd2ff;
+  --color-brand-400: #1cbdf5;
+  --color-brand-500: #00a3e0;
+  --color-brand-600: #007fc4;
+  --color-brand-700: #00629c;
+  --color-brand-800: #084d78;
+  --color-brand-900: #0a3d5e;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
+    monospace;
+}
+
+/* ── Paytm PODS design tokens ─────────────────────────────────── */
+:root {
+  --surface-level-1: #ffffff;
+  --surface-level-3: #fafafa;
+  --surface-level-4: #f5f5f5;
+
+  --text-neutral-strong: #282828;
+  --text-neutral-moderate: #414244;
+  --text-neutral-medium: #7e7e7e;
+  --text-neutral-weak: #cacaca;
+  --text-neutral-inverse: #ffffff;
+  --text-primary-strong: #004299;
+  --text-primary-medium: #1576db;
+  --text-positive-strong: #158939;
+  --text-negative-strong: #e12e3a;
+  --text-notice-strong: #ffa905;
+
+  --background-primary-strong: #004299;
+  --background-primary-medium: #1576db;
+  --background-primary-weak: #dfedff;
+  --background-positive-strong: #158939;
+  --background-positive-weak: #dbf0e2;
+  --background-negative-strong: #e12e3a;
+  --background-negative-weak: #ffd1d1;
+  --background-notice-strong: #ffa905;
+  --background-notice-weak: #fff2cc;
+  --background-neutral-inverse: #ffffff;
+
+  --border-neutral-weak: #ebebeb;
+  --border-neutral-medium: #7e7e7e;
+  --border-primary-medium: #1576db;
+
+  --icon-primary-medium: #1576db;
+  --icon-neutral-strong: #282828;
+  --icon-neutral-medium: #7e7e7e;
+
+  --brand-primary: #00b8f5;
+
+  --gap-m: 4px;
+  --gap-l: 6px;
+  --gap-xl: 8px;
+  --gap-2xl: 12px;
+  --gap-3xl: 16px;
+  --gap-4xl: 24px;
+  --gap-5xl: 32px;
+
+  --radius-m: 8px;
+  --radius-l: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --radius-3xl: 24px;
+  --radius-max: 64px;
+
+  --page-gutter: 12px;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-ink-50);
+  color: var(--color-ink-800);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Dark mode ────────────────────────────────────────────────────
+   Strategy: flip the ink scale (drives utilities AND var()-based CSS like
+   .prose-chat), then fix the handful of dual-role cases that a flip breaks:
+   literal-white surfaces, intentionally-dark ink-800/900 elements, light text
+   that sits on those, and the light brand/status tints. No component edits. */
+:root { color-scheme: light; }
+html.dark { color-scheme: dark; }
+
+html.dark {
+  --color-ink-50: #0e1320;
+  --color-ink-100: #1a2130;
+  --color-ink-200: #2b3547;
+  --color-ink-300: #5c6a82;
+  --color-ink-400: #79879f;
+  --color-ink-500: #93a1b8;
+  --color-ink-600: #b1bccf;
+  --color-ink-700: #ced7e5;
+  --color-ink-800: #e4eaf3;
+  --color-ink-900: #f2f5fb;
+  /* Light hover/active tints → dark (also fixes var()-based uses like the
+     table row hover). brand-50/100 are only ever used as backgrounds. */
+  --color-brand-50: #0f2636;
+  --color-brand-100: #13354a;
+}
+
+/* Surfaces built on literal white. */
+.dark .bg-white { background-color: #161c29; }
+.dark .bg-white\/90 { background-color: rgb(22 28 41 / 0.9); }
+.dark .bg-white\/80 { background-color: rgb(22 28 41 / 0.8); }
+.dark .bg-white\/70 { background-color: rgb(22 28 41 / 0.7); }
+.dark .bg-white\/60 { background-color: rgb(22 28 41 / 0.6); }
+
+/* Elements meant to stay dark (the flip would lighten them). */
+.dark .bg-ink-800 { background-color: #2c3850; }
+.dark .bg-ink-900 { background-color: #0a0e18; }
+.dark .bg-ink-900\/70 { background-color: rgb(4 7 13 / 0.7); }
+.dark .from-ink-900 { --tw-gradient-from: #0c111d; }
+.dark .to-ink-800 { --tw-gradient-to: #141b2b; }
+
+/* Light text that sits on those dark elements — keep it light. */
+.dark .text-ink-100 { color: #e9eef6; }
+.dark .text-ink-200 { color: #cfd9e8; }
+
+/* Code blocks stay dark even though ink-900 is now light. */
+.dark .prose-chat pre { background-color: #0c111d; }
+
+/* Brand accent text (utilities). bg-brand-50/100 tints flip via the vars above. */
+.dark .text-brand-600 { color: #3cc6f5; }
+.dark .text-brand-700 { color: #4fd2ff; }
+.dark .text-brand-800 { color: #7fdcff; }
+
+/* Table surfaces that used literal light values (don't flip via vars). */
+.dark .prose-chat .md-table-scroll { background-color: #161c29; }
+.dark .prose-chat .md-table-copy { background-color: rgb(22 28 41 / 0.85); }
+
+/* Prose links use the brand var directly — lighten them for dark surfaces. */
+.dark .prose-chat a { color: #4fd2ff; text-decoration-color: rgb(79 210 255 / 0.4); }
+.dark .prose-chat a:hover { color: #7fdcff; }
+
+/* Status tints (banners / badges / errors). */
+.dark .bg-emerald-50 { background-color: rgb(16 185 129 / 0.14); }
+.dark .bg-amber-50 { background-color: rgb(245 158 11 / 0.14); }
+.dark .bg-rose-50 { background-color: rgb(244 63 94 / 0.14); }
+.dark .border-amber-200 { border-color: rgb(245 158 11 / 0.35); }
+.dark .border-rose-200 { border-color: rgb(244 63 94 / 0.35); }
+.dark .text-emerald-500,
+.dark .text-emerald-600,
+.dark .text-emerald-700 { color: #6ee7b7; }
+.dark .text-amber-800 { color: #fcd34d; }
+.dark .text-rose-500,
+.dark .text-rose-600,
+.dark .text-rose-700 { color: #fda4af; }
+
+/* Thin, unobtrusive scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-200) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-ink-200);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-300);
+}
+
+/* Blinking caret for the streaming cursor */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.stream-caret {
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--color-brand-500);
+  border-radius: 1px;
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+/* ── Markdown prose ───────────────────────────────────────────── */
+.prose-chat {
+  font-size: 0.95rem;
+  line-height: 1.72;
+  color: var(--color-ink-700);
+  /* Break only over-long tokens (URLs, hashes) — never normal words. */
+  overflow-wrap: anywhere;
+}
+.prose-chat > *:first-child { margin-top: 0; }
+.prose-chat > *:last-child { margin-bottom: 0; }
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  font-weight: 680;
+  line-height: 1.28;
+  letter-spacing: -0.012em;
+  color: var(--color-ink-900);
+  scroll-margin-top: 1rem;
+}
+.prose-chat h1 {
+  font-size: 1.4rem;
+  margin: 1.4em 0 0.6em;
+}
+.prose-chat h2 {
+  font-size: 1.2rem;
+  margin: 1.75em 0 0.75em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--color-ink-100);
+}
+.prose-chat h3 {
+  font-size: 1.05rem;
+  margin: 1.45em 0 0.5em;
+}
+.prose-chat h4 {
+  font-size: 0.95rem;
+  margin: 1.2em 0 0.4em;
+  color: var(--color-ink-600);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.prose-chat p { margin: 0.75em 0; }
+.prose-chat ul,
+.prose-chat ol { margin: 0.7em 0; padding-left: 1.5em; }
+.prose-chat ul { list-style: disc; }
+.prose-chat ol { list-style: decimal; }
+.prose-chat li { margin: 0.4em 0; padding-left: 0.2em; }
+.prose-chat li::marker { color: var(--color-brand-400); }
+.prose-chat ol li::marker {
+  color: var(--color-ink-400);
+  font-weight: 600;
+}
+.prose-chat li > ul,
+.prose-chat li > ol { margin: 0.4em 0; }
+.prose-chat li > p { margin: 0.3em 0; }
+.prose-chat a {
+  color: var(--color-brand-600);
+  text-decoration: underline;
+  text-decoration-color: var(--color-brand-200);
+  text-underline-offset: 2px;
+  transition: text-decoration-color 0.12s, color 0.12s;
+}
+.prose-chat a:hover {
+  color: var(--color-brand-700);
+  text-decoration-color: var(--color-brand-500);
+}
+.prose-chat strong { font-weight: 680; color: var(--color-ink-900); }
+.prose-chat em { color: var(--color-ink-600); }
+
+/* ── Jira form inputs ─────────────────────────────────────────── */
+.jira-input {
+  width: 100%;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-ink-200);
+  background-color: #fff;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.82rem;
+  color: var(--color-ink-800);
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.jira-input:focus {
+  border-color: var(--color-brand-400);
+  box-shadow: 0 0 0 3px var(--color-brand-100);
+}
+.jira-input::placeholder { color: var(--color-ink-300); }
+.jira-input:disabled { opacity: 0.5; cursor: not-allowed; }
+.dark .jira-input { background-color: #11161f; }
+.prose-chat code {
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  background: var(--color-ink-100);
+  border: 1px solid var(--color-ink-200);
+  padding: 0.1em 0.36em;
+  border-radius: 5px;
+  color: var(--color-ink-700);
+  word-break: break-word;
+}
+/* ── Fenced code blocks (with hover copy) ─────────────────────── */
+.prose-chat .md-pre-wrap {
+  position: relative;
+  margin: 0.8em 0;
+}
+.prose-chat pre {
+  background: var(--color-ink-900);
+  color: #e6edf3;
+  padding: 0.9rem 1rem;
+  border-radius: 10px;
+  overflow-x: auto;
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+.prose-chat pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.prose-chat .md-pre-copy {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: grid;
+  place-items: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  border-radius: 7px;
+  color: #cdd9e5;
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.prose-chat .md-pre-wrap:hover .md-pre-copy { opacity: 1; }
+.prose-chat .md-pre-copy:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+.prose-chat blockquote {
+  border-left: 3px solid var(--color-brand-300);
+  padding-left: 0.9rem;
+  margin: 0.8em 0;
+  color: var(--color-ink-600);
+}
+/* ── Tables — rounded, scrollable, copyable ───────────────────── */
+.prose-chat .md-table-wrap {
+  position: relative;
+  margin: 1em 0;
+}
+.prose-chat .md-table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--color-ink-200);
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(13, 22, 38, 0.05);
+  background: #fff;
+}
+.prose-chat table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+.prose-chat th,
+.prose-chat td {
+  padding: 0.6rem 0.85rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-ink-100);
+  border-right: 1px solid var(--color-ink-100);
+  /* Keep real words intact in cells; rely on horizontal scroll instead. */
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.prose-chat th:last-child,
+.prose-chat td:last-child { border-right: none; }
+.prose-chat tbody tr:last-child td { border-bottom: none; }
+.prose-chat thead th {
+  white-space: nowrap;
+  background: var(--color-ink-100);
+  font-weight: 650;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-600);
+}
+.prose-chat tbody tr { transition: background 0.1s; }
+.prose-chat tbody tr:nth-child(even) td { background: var(--color-ink-50); }
+.prose-chat tbody tr:hover td { background: var(--color-brand-50); }
+.prose-chat .md-table-copy {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-radius: 7px;
+  color: var(--color-ink-500);
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--color-ink-200);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+}
+.prose-chat .md-table-wrap:hover .md-table-copy { opacity: 1; }
+.prose-chat .md-table-copy:hover {
+  color: var(--color-brand-600);
+  border-color: var(--color-brand-300);
+}
+.prose-chat hr {
+  border: none;
+  border-top: 1px solid var(--color-ink-200);
+  margin: 1.2em 0;
+}
+
+/* Learn feed: hide the in-card scrollbar (content can overflow the snap pane). */
+.learn-scroll::-webkit-scrollbar {
+  display: none;
+}

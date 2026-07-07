@@ -24,10 +24,12 @@ const css = `
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
   @keyframes shimmer { 0% { background-position: -200% center; } 100% { background-position: 200% center; } }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes discoverPulse { 0%,100% { box-shadow: 0 0 0 0 #e8b84b22; } 50% { box-shadow: 0 0 0 8px #e8b84b00; } }
   .fade-in { animation: fadeSlideIn 0.35s ease forwards; }
   .sentinel-glow { box-shadow: 0 0 0 1px #e8b84b22, 0 4px 24px #e8b84b18; }
   .hover-lift:hover { transform: translateY(-2px); box-shadow: 0 8px 28px rgba(232,184,75,0.15); }
   textarea:focus, input:focus { border-color: #e8b84b88 !important; box-shadow: 0 0 0 3px #e8b84b12; }
+  .discovery-pulse { animation: discoverPulse 2s ease-in-out infinite; }
 `;
 const styleEl = document.createElement("style");
 styleEl.textContent = css;
@@ -58,14 +60,14 @@ A table with ONLY these fields (no others):
 | Field | Value |
 | Feature Name | [from input] |
 | JIRA ID | [from input] |
+| Fix Version | [from input or N/A] |
+| Reporter | [from input or N/A] |
+| Assignee | [from input or N/A] |
+| Labels | [from input or N/A] |
 | UAT Scope | ${scopeList} |
 
 ## 2️⃣ Objective
 ${objective ? `Use this confirmed objective: ${objective}` : "Derive from inputs. Describe what was validated in 2-3 sentences."}
-
-## 5️⃣ UAT Acceptance Criteria
-Table with columns: UAT Scenario | QA Test Case ID | Result | Remarks
-Extract ALL test cases from input. Mark PASS/FAIL/BLOCKED clearly.
 
 ## 3️⃣ + 4️⃣ Scope Definition
 **MERGED SECTION** (scope table + test execution summary + counts below)
@@ -83,7 +85,7 @@ List all relevant in-scope items including:
 
 Then, Test Execution Summary table:
 | QA Test Case ID | Scenario | Result | Remarks |
-List every test case with its ID.
+List every test case with its ID. For Result column: use the EXACT QA_status from input test cases — map "Not Started" or "Not Executed" → Not Executed, "Pass"/"Passed" → PASS, "Fail"/"Failed" → FAIL, "Blocked" → BLOCKED. NEVER infer or assume a result.
 
 Then counts summary:
 | Category | Count |
@@ -92,29 +94,41 @@ Then counts summary:
 | Failed | X |
 | Blocked | X |
 | Not Executed | X |
+Derive counts from the actual QA_status values. Do NOT invent counts.
+
+## 5️⃣ UAT Acceptance Criteria
+Table with columns: UAT Scenario | QA Test Case ID | Result | Remarks
+Extract ALL test cases from input. Use the QA_status field from each test case as the Result. Never infer PASS/FAIL — only use status explicitly stated in the input. If QA_status is "Not Started", mark Result as "Not Executed".
 
 ## 6️⃣ Defect / Gap Summary
 Severity counts table, then gap details table: Gap ID | Description | Severity | Impact | Recommendation
 
-## 7️⃣ Risk Assessment  
+## 7️⃣ Discrepancy Analysis
+CRITICAL: Compare UAT acceptance criteria/scenarios against QA/Dev test cases provided.
+Table: | AC Item | UAT Scenario | QA Test Case ID | Covered? | Gap Severity | Recommendation |
+- Mark "Not Covered" for any AC item that has NO corresponding QA test case
+- Raise HIGH severity discrepancy if fund-loss or risk-critical AC not covered
+- If no QA test cases were provided, note: "QA test cases not provided — discrepancy analysis skipped."
+
+## 8️⃣ Risk Assessment
 Table: Risk Area | Impact | Status
 
-## 8️⃣ Production Readiness Checklist
-Table: Validation Item | Status (use ✅ ⚠️ ❌)
+## 9️⃣ Production Readiness Checklist
+Table: Validation Item | Status (use ✅ ⚠️ ❌). Only mark ✅ for items explicitly confirmed in input. Mark ⚠️ for items partially confirmed or unclear. Mark ❌ for items not tested or failing. Do NOT assume ✅ without evidence.
 
-## 9️⃣ UAT Final Decision
+## 🔟 UAT Final Decision
 State ONLY: ✅ PASS, ⚠️ PASS WITH CONDITIONS, or ❌ FAIL
-Then 2-3 sentence justification.
+Then 2-3 sentence justification. If any test cases are Not Executed, default to ⚠️ PASS WITH CONDITIONS unless all critical scenarios are confirmed passed. If discrepancies found, mention them.
 DO NOT include Sign-off Pending, Prepared By, Date, or Next Review fields.
 
-Rules: never invent counts; use "Insufficient data — please supply [X]" if missing; markdown tables only; professional tone; start with "# UAT Status". Keep wording compact to save tokens without omitting any required section.`;
+Rules: never invent counts or results; use the EXACT QA_status from input test cases; use "Insufficient data — please supply [X]" if status is missing; markdown tables only; professional tone; start with "# UAT Status". Keep wording compact to save tokens without omitting any required section.`;
 };
 
 const CLARIFY_SYSTEM = `You are TestSentinel, a UAT expert for fintech and UPI payment systems.
 
-The user provided UAT inputs. Generate:
+The user provided UAT inputs including JIRA ticket data, attachments, and existing test cases. Generate:
 1. First: A draft "Objective" paragraph (2-3 sentences) based on their inputs
-2. Then: 3-6 targeted clarifying questions to improve the signoff
+2. Then: 3-6 targeted clarifying questions to improve the signoff — focus ONLY on what is still unknown
 
 Format your response as:
 
@@ -126,9 +140,26 @@ QUESTIONS:
 2. [question]
 ...
 
-Be specific and concise.`;
+Be specific and concise. Do not ask about information that was already provided.`;
 
-// ── History (persisted to localStorage for online/offline) ───────────────────
+const DISCREPANCY_SYSTEM = `You are TestSentinel, a UAT validation expert.
+
+Compare the UAT test scenarios against the QA/Dev test cases provided.
+Generate a concise discrepancy report:
+
+## Discrepancy Analysis
+
+| AC / UAT Scenario | QA Test Case ID | QA Coverage | Gap? | Severity | Action Required |
+|---|---|---|---|---|---|
+[rows for each UAT scenario]
+
+Then provide:
+**Gap Count:** X critical, Y medium, Z low
+**Verdict:** COMPLETE COVERAGE / PARTIAL COVERAGE / SIGNIFICANT GAPS
+
+Be precise. Only raise genuine gaps where an acceptance criteria item has NO corresponding QA test case.`;
+
+// ── History (persisted to localStorage) ─────────────────────────────────────
 const UAT_HISTORY_KEY = "uat-sentinel-history-v1";
 const UAT_HISTORY_MAX_DAYS = 60;
 
@@ -198,7 +229,6 @@ async function readFiles(fileList) {
   return { files: arr, contents };
 }
 
-/** Bedrock caps total prompt ~200k tokens; cap user context to avoid failures (mixed text ~3–4 chars/token). */
 const MAX_CLARIFY_USER_CHARS = 100_000;
 const MAX_GENERATE_USER_CHARS = 420_000;
 const MAX_FEEDBACK_USER_CHARS = 420_000;
@@ -206,7 +236,7 @@ const MAX_FEEDBACK_USER_CHARS = 420_000;
 function truncateForLLM(text, maxChars) {
   const s = String(text || "");
   if (s.length <= maxChars) return s;
-  return `${s.slice(0, maxChars)}\n\n[TRUNCATED — input exceeded ${maxChars.toLocaleString()} characters (${s.length.toLocaleString()} total). Tail omitted to stay within model limits; shorten pastes or use fewer files for full context.]`;
+  return `${s.slice(0, maxChars)}\n\n[TRUNCATED — input exceeded ${maxChars.toLocaleString()} characters (${s.length.toLocaleString()} total). Tail omitted.]`;
 }
 
 function formatInline(t) {
@@ -230,16 +260,14 @@ function MarkdownRenderer({ content }) {
         rows.push(lines[i].split("|").slice(1,-1).map(c=>c.trim()));
         i++;
       }
-      const isResultCol = (h) => ["result","status"].includes(h.toLowerCase());
+      const isResultCol = (h) => ["result","status","covered?","gap?"].includes(h.toLowerCase());
       const colorResult = (v) => {
         if (!v) return v;
         const u = v.toUpperCase();
         if (u.includes("PASS") && !u.includes("FAIL")) return `<span style="color:#34d399;font-weight:700">${v}</span>`;
-        if (u.includes("FAIL")) return `<span style="color:#f87171;font-weight:700">${v}</span>`;
-        if (u.includes("BLOCK")) return `<span style="color:#fbbf24;font-weight:700">${v}</span>`;
-        if (u.includes("✅")) return `<span style="color:#34d399">${v}</span>`;
-        if (u.includes("⚠")) return `<span style="color:#fbbf24">${v}</span>`;
-        if (u.includes("❌")) return `<span style="color:#f87171">${v}</span>`;
+        if (u.includes("FAIL") || u==="NOT COVERED" || u.includes("❌")) return `<span style="color:#f87171;font-weight:700">${v}</span>`;
+        if (u.includes("BLOCK") || u.includes("PARTIAL") || u.includes("⚠")) return `<span style="color:#fbbf24;font-weight:700">${v}</span>`;
+        if (u.includes("COVERED") && !u.includes("NOT") || u.includes("✅")) return `<span style="color:#34d399">${v}</span>`;
         return formatInline(v);
       };
       result.push(`<div style="overflow-x:auto;margin:14px 0;border-radius:8px;overflow:hidden;border:1px solid #1e1e38">
@@ -285,6 +313,7 @@ function Btn({ children, variant="primary", onClick, disabled, style={}, size="m
     ghost: { background:"transparent", color:C.subtle, border:`1px solid ${C.border}` },
     danger: { background:"#f8717118", color:"#f87171", border:"1px solid #f8717133" },
     outline: { background:"transparent", color:C.gold, border:`1px solid ${C.goldDim}` },
+    teal: { background:"#0d9488", color:"#fff", boxShadow:"0 2px 12px #0d948830" },
   };
   return <button type="button" onClick={disabled?undefined:onClick} style={{...base,...variants[variant]}}>{children}</button>;
 }
@@ -390,13 +419,32 @@ function ModelPicker({ selected, onChange }) {
   );
 }
 
-function Spinner() {
-  return <div style={{ width:16, height:16, border:`2px solid ${C.border}`, borderTopColor:C.gold, borderRadius:"50%", animation:"spin 0.7s linear infinite", display:"inline-block" }}/>;
+function Spinner({ size=16 }) {
+  return <div style={{ width:size, height:size, border:`2px solid ${C.border}`, borderTopColor:C.gold, borderRadius:"50%", animation:"spin 0.7s linear infinite", display:"inline-block", flexShrink:0 }}/>;
+}
+
+// ── Status badge helper ───────────────────────────────────────────────────────
+function StatusBadge({ status, label }) {
+  const cfg = {
+    loading: { color:"#60a5fa", icon:"⏳" },
+    ok: { color:"#34d399", icon:"✅" },
+    warn: { color:"#fbbf24", icon:"⚠️" },
+    error: { color:"#f87171", icon:"❌" },
+    skip: { color:C.muted, icon:"⏭️" },
+  }[status] || { color:C.muted, icon:"•" };
+  return (
+    <span style={{ display:"inline-flex", alignItems:"center", gap:5, fontSize:11, color:cfg.color, fontFamily:C.mono }}>
+      {status==="loading" ? <Spinner size={12}/> : <span>{cfg.icon}</span>}
+      {label}
+    </span>
+  );
 }
 
 // ── Step indicator ────────────────────────────────────────────────────────────
-function StepBar({ step }) {
-  const steps = ["Inputs", "Clarify & Objective", "Review & Generate", "Signoff"];
+function StepBar({ step, hasDiscovery }) {
+  const steps = hasDiscovery
+    ? ["Input", "Discovery", "Clarify", "Review", "Signoff"]
+    : ["Input", "Clarify", "Review", "Signoff"];
   return (
     <div style={{ display:"flex", alignItems:"center", gap:0, marginBottom:28 }}>
       {steps.map((s,i)=>(
@@ -420,21 +468,62 @@ function StepBar({ step }) {
   );
 }
 
+// ── Discovery Row ─────────────────────────────────────────────────────────────
+function DiscoveryRow({ icon, label, status, detail }) {
+  return (
+    <div style={{ display:"flex", alignItems:"flex-start", gap:10, padding:"8px 0", borderBottom:`1px solid ${C.border}` }}>
+      <span style={{ fontSize:16, marginTop:1, flexShrink:0 }}>{icon}</span>
+      <div style={{ flex:1 }}>
+        <div style={{ fontSize:12, color:C.text, fontWeight:600, fontFamily:C.font }}>{label}</div>
+        {detail && <div style={{ fontSize:11, color:C.muted, fontFamily:C.mono, marginTop:2, lineHeight:1.5 }}>{detail}</div>}
+      </div>
+      <StatusBadge status={status} label={
+        status==="ok" ? "Found" :
+        status==="warn" ? "Partial" :
+        status==="error" ? "Failed" :
+        status==="skip" ? "Skipped" :
+        status==="loading" ? "Fetching..." : "—"
+      }/>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function TestSentinel() {
-  const [view, setView] = useState("home"); // home | new | result | history
-  const [step, setStep] = useState(0); // 0=inputs, 1=clarify, 2=review, 3=done
+  const [view, setView] = useState("home");
+  const [step, setStep] = useState(0);
   const [model, setModel] = useState(MODELS[0].id);
   const [webSearch, setWebSearch] = useState(false);
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
 
-  // Inputs
-  const [selectedDomains, setSelectedDomains] = useState(["switch"]);
+  // Jira fetch
+  const [jiraIssueKey, setJiraIssueKey] = useState("");
+  const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
+  const [jiraFetchError, setJiraFetchError] = useState("");
+  const [lastJiraPayload, setLastJiraPayload] = useState(null);
+
+  // JIRA details (auto-populated or manual)
   const [jiraSubject, setJiraSubject] = useState("");
   const [jiraDesc, setJiraDesc] = useState("");
   const [jiraMode, setJiraMode] = useState("type");
   const [jiraFiles, setJiraFiles] = useState([]); const [jiraFC, setJiraFC] = useState([]);
+
+  // Domain scope
+  const [selectedDomains, setSelectedDomains] = useState(["switch"]);
+
+  // Discovery state
+  const [discovery, setDiscovery] = useState(null);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [discoveryLog, setDiscoveryLog] = useState([]);
+  const [hasDiscovery, setHasDiscovery] = useState(false);
+
+  // Gap answers (Step 1 – Discovery)
+  const [gapAnswers, setGapAnswers] = useState("");
+  const [gapMode, setGapMode] = useState("type");
+  const [gapFiles, setGapFiles] = useState([]); const [gapFC, setGapFC] = useState([]);
+
+  // Legacy input fields (kept for manual mode / additional context)
   const [testCases, setTestCases] = useState("");
   const [testMode, setTestMode] = useState("type");
   const [testFiles, setTestFiles] = useState([]); const [testFC, setTestFC] = useState([]);
@@ -443,14 +532,16 @@ export default function TestSentinel() {
   const [docsFiles, setDocsFiles] = useState([]); const [docsFC, setDocsFC] = useState([]);
 
   // Clarify step
-  const [clarifyRaw, setClarifyRaw] = useState(""); // full AI response
+  const [clarifyRaw, setClarifyRaw] = useState("");
   const [draftObjective, setDraftObjective] = useState("");
   const [editedObjective, setEditedObjective] = useState("");
   const [clarifyAnswers, setClarifyAnswers] = useState("");
 
   // Result
-  const [result, setResult] = useState(null); // { signoff, id, domains }
+  const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [discrepancyResult, setDiscrepancyResult] = useState(null);
+  const [discrepancyLoading, setDiscrepancyLoading] = useState(false);
 
   // Feedback
   const [feedbackText, setFeedbackText] = useState("");
@@ -459,19 +550,17 @@ export default function TestSentinel() {
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [feedbackMemory, setFeedbackMemory] = useState(() => loadUATFeedbackMemory());
 
-  // Auto-publish only right after a new generation (not when reopening history)
   const [autoPublishChannels, setAutoPublishChannels] = useState({ jira: false, telegram: false, email: false, slack: false });
   const [allowAutoPublish, setAllowAutoPublish] = useState(false);
-  // JIRA Connector: fetch issue key input and loading
-  const [jiraIssueKey, setJiraIssueKey] = useState("");
-  const [jiraFetchLoading, setJiraFetchLoading] = useState(false);
-  const [jiraFetchError, setJiraFetchError] = useState("");
-  /** Last successful GET /api/jira-issue payload (connector banner + links). */
-  const [lastJiraPayload, setLastJiraPayload] = useState(null);
 
   useEffect(() => { saveUATFeedbackMemoryLS(feedbackMemory); }, [feedbackMemory]);
 
   const [, setHistoryImportBump] = useState(0);
+
+  // Local Drive file cleanup after UAT
+  const [localDriveCleanupFiles, setLocalDriveCleanupFiles] = useState([]); // [{path, name, deleted}]
+  const [cleanupConfirming, setCleanupConfirming] = useState(false);
+  const [cleanupStatus, setCleanupStatus] = useState(null); // null | "deleted" | "kept" | "error"
   useEffect(() => {
     const onImport = () => {
       reloadUATHistoryModuleFromLS();
@@ -482,9 +571,10 @@ export default function TestSentinel() {
     return () => window.removeEventListener("agent-localstorage-imported", onImport);
   }, []);
 
-  const jiraRef = useRef(); const testRef = useRef(); const docsRef = useRef(); const fbRef = useRef();
+  const jiraRef = useRef(); const testRef = useRef(); const docsRef = useRef(); const fbRef = useRef(); const gapRef = useRef();
   const hasSentNotifyRef = useRef(false);
 
+  // ── Helpers ──────────────────────────────────────────────────────────────────
   function parseJiraIssueKey(input) {
     const s = (input || "").trim();
     if (!s) return "";
@@ -499,6 +589,56 @@ export default function TestSentinel() {
     return "";
   }
 
+  const addFiles = async (fl, setF, setC) => {
+    const { files, contents } = await readFiles(fl);
+    setF(p=>[...p,...files]); setC(p=>[...p,...contents]);
+  };
+  const removeFile = (i, setF, setC) => { setF(p=>p.filter((_,j)=>j!==i)); setC(p=>p.filter((_,j)=>j!==i)); };
+
+  // ── LLM call with fallback ────────────────────────────────────────────────
+  const callClaude = async (systemPrompt, userMessage, maxTokens = 8000) => {
+    const makeBody = (extra = {}) => JSON.stringify({
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+      max_tokens: maxTokens,
+      agent: "UAT",
+      llmProvider: getLlmProviderForRequest(),
+      llmDisabled: getLlmDisabledForRequest(),
+      bedrockModelTier: getBedrockModelTierForRequest(),
+      ...getLlmRoutingExtras(),
+      ...extra,
+    });
+    const extractText = (data) => {
+      const payload = data.data ?? data;
+      const blocks = payload?.content;
+      if (Array.isArray(blocks)) return blocks.filter(b=>b.type==="text").map(b=>b.text||"").join("\n");
+      return String(payload?.text || payload?.output || payload?.result || "");
+    };
+    // Primary endpoint
+    try {
+      const res = await fetch(`${API_BASE}/api/generate`, { method:"POST", headers:{"Content-Type":"application/json"}, body: makeBody() });
+      const text = await res.text();
+      let data; try { data = JSON.parse(text); } catch { data = {}; }
+      if (!res.ok || data.error) throw new Error(data.message || data.error?.message || `Primary failed: ${res.status}`);
+      const out = extractText(data);
+      if (out) return out;
+      throw new Error("Empty response from primary endpoint");
+    } catch (primaryErr) {
+      console.warn("[UAT] Primary endpoint failed, trying /api/claude:", primaryErr.message);
+      // Fallback to direct Claude endpoint
+      try {
+        const res2 = await fetch(`${API_BASE}/api/claude`, { method:"POST", headers:{"Content-Type":"application/json"}, body: makeBody() });
+        const text2 = await res2.text();
+        let data2; try { data2 = JSON.parse(text2); } catch { data2 = {}; }
+        if (!res2.ok || data2.error) throw new Error(data2.message || data2.error?.message || `Fallback failed: ${res2.status}`);
+        return extractText(data2) || "Generation completed (empty response).";
+      } catch (fallbackErr) {
+        throw new Error(`LLM unavailable. Primary: ${primaryErr.message}. Fallback: ${fallbackErr.message}. Try restarting services.`);
+      }
+    }
+  };
+
+  // ── JIRA fetch (pure data) ────────────────────────────────────────────────
   const handleFetchJiraUAT = async () => {
     const raw = jiraIssueKey.trim();
     const key = parseJiraIssueKey(raw);
@@ -515,7 +655,13 @@ export default function TestSentinel() {
       if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
       setLastJiraPayload(d);
       setJiraSubject(d.summary ? `${d.id} — ${d.summary}` : d.id || jiraIssueKey);
-      setJiraDesc([d.description, d.acceptanceCriteria ? `Acceptance criteria:\n${d.acceptanceCriteria}` : ""].filter(Boolean).join("\n\n") || "(No description)");
+      const descParts = [
+        d.description,
+        d.acceptanceCriteria ? `Acceptance Criteria:\n${d.acceptanceCriteria}` : "",
+        d.requirement ? `Requirement:\n${d.requirement}` : "",
+        d.fundlossRisk ? `Fund Loss / Risk:\n${d.fundlossRisk}` : "",
+      ].filter(Boolean);
+      setJiraDesc(descParts.join("\n\n") || "(No description)");
       setJiraMode("type");
       syncPublishDefaultJiraKey(d.id || key);
       syncPublishJiraSiteFromIssue(d);
@@ -525,89 +671,180 @@ export default function TestSentinel() {
     setJiraFetchLoading(false);
   };
 
-  const addFiles = async (fl, setF, setC) => {
-    const { files, contents } = await readFiles(fl);
-    setF(p=>[...p,...files]); setC(p=>[...p,...contents]);
-  };
-  const removeFile = (i, setF, setC) => { setF(p=>p.filter((_,j)=>j!==i)); setC(p=>p.filter((_,j)=>j!==i)); };
+  // ── Discovery: fetch attachments + Drive links ────────────────────────────
+  const handleRunDiscovery = async (jiraPayload) => {
+    const payload = jiraPayload || lastJiraPayload;
+    if (!payload) return;
+    setDiscoveryLoading(true);
+    setDiscoveryLog([]);
+    const log = (msg) => setDiscoveryLog(prev => [...prev, msg]);
 
-  const buildContext = () => {
-    const doms = AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id));
-    const scope = doms.map(d=>d.full).join(", ")||"All Services";
-    let ctx = `UAT Scope: ${scope}\n\n`;
-    if (jiraMode==="type") { if(jiraSubject) ctx+=`JIRA Subject: ${jiraSubject}\n`; if(jiraDesc) ctx+=`JIRA Description:\n${jiraDesc}\n\n`; }
-    else jiraFC.forEach(f=>{ ctx+=`JIRA File [${f.name}]:\n${f.content}\n\n`; });
-    if (testMode==="type") { if(testCases) ctx+=`Test Cases / Logs:\n${testCases}\n\n`; }
-    else testFC.forEach(f=>{ ctx+=`Test Cases File [${f.name}]:\n${f.content}\n\n`; });
-    if (docsMode==="type") { if(docsText) ctx+=`Supporting Context:\n${docsText}\n\n`; }
-    else docsFC.forEach(f=>{ ctx+=`Supporting Doc [${f.name}]:\n${f.content}\n\n`; });
-    return ctx;
+    const disc = {
+      jiraFields: {
+        id: payload.id,
+        summary: payload.summary,
+        reporter: payload.reporter,
+        assignee: payload.assignee,
+        fixVersions: payload.fixVersions,
+        labels: payload.labels,
+        status: payload.status,
+        priority: payload.priority,
+        components: payload.components,
+        acceptanceCriteria: payload.acceptanceCriteria,
+        requirement: payload.requirement || "",
+        fundlossRisk: payload.fundlossRisk || "",
+        comments: payload.comments,
+      },
+      attachmentResults: [],
+      driveResults: [],
+      testCasesFromSheets: "",
+      existingQATestCases: payload.comments || "",
+      gapsDetected: [],
+    };
+
+    // Extract attachments
+    const attachItems = Array.isArray(payload.attachmentItems) ? payload.attachmentItems : [];
+    log(`📎 Found ${attachItems.length} attachment(s)`);
+    for (const att of attachItems) {
+      const fname = att.filename || "file";
+      const isDoc = /\.(pdf|docx|xlsx|xls|txt|csv|md)$/i.test(fname);
+      if (!isDoc) {
+        disc.attachmentResults.push({ filename: fname, status: "skip", text: "", chars: 0 });
+        log(`⏭️ Skipped ${fname} (not a document)`);
+        continue;
+      }
+      try {
+        log(`⏳ Extracting ${fname}...`);
+        const r = await fetch(`${API_BASE}/api/jira-attachment-text?${new URLSearchParams({ url: att.url, filename: fname })}`);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) throw new Error(d.error || "Extraction failed");
+        disc.attachmentResults.push({ filename: fname, status: "ok", text: d.text || "", chars: d.chars || (d.text||"").length });
+        log(`✅ Extracted ${fname}: ${(d.chars||0).toLocaleString()} chars`);
+      } catch (e) {
+        disc.attachmentResults.push({ filename: fname, status: "error", text: "", chars: 0, error: e.message });
+        log(`❌ Failed ${fname}: ${e.message}`);
+      }
+    }
+
+    // Extract Google Drive links
+    const driveLinks = Array.isArray(payload.driveLinks) ? payload.driveLinks : [];
+    const sheetLinks = Array.isArray(payload.qaTestCaseSheetUrls) ? payload.qaTestCaseSheetUrls : [];
+    const allDriveLinks = [...new Set([...driveLinks, ...sheetLinks])];
+    log(`🔗 Found ${allDriveLinks.length} Google Drive link(s)`);
+
+    const jiraKey = payload.id || "";
+    for (const url of allDriveLinks) {
+      try {
+        log(`⏳ Fetching Drive link locally (tab: ${jiraKey || "auto"})...`);
+        const params = { url };
+        if (jiraKey) params.sheetTabName = jiraKey;
+        const r = await fetch(`${API_BASE}/api/gdrive-fetch?${new URLSearchParams(params)}`);
+        const d = await r.json().catch(() => ({}));
+        if (d.localNotFound) {
+          disc.driveResults.push({ url, status: "warn", text: null, error: d.message, hint: d.hint, type: d.type, localNotFound: true });
+          log(`⚠️ ${d.message}`);
+        } else if (d.requiresAuth || !d.text) {
+          disc.driveResults.push({ url, status: "warn", text: null, error: d.error || "Requires login", type: d.type });
+          log(`⚠️ Drive link requires auth — user must paste content`);
+        } else {
+          const src = d.source === "local" ? `local file (${d.filePath?.split("/").pop()})` : "remote";
+          disc.driveResults.push({ url, status: "ok", text: d.text, chars: d.chars || d.text.length, type: d.type, source: d.source, filePath: d.filePath });
+          disc.testCasesFromSheets += `\n\nGoogle ${d.type==="sheet"?"Sheets":"Docs"} content (${src}):\n${d.text}`;
+          log(`✅ Drive content fetched from ${src}: ${(d.chars||0).toLocaleString()} chars`);
+        }
+      } catch (e) {
+        disc.driveResults.push({ url, status: "error", text: null, error: e.message });
+        log(`❌ Drive fetch error: ${e.message}`);
+      }
+    }
+
+    // Detect gaps
+    if (!disc.jiraFields.acceptanceCriteria) disc.gapsDetected.push("Acceptance Criteria not found in JIRA ticket");
+    if (!disc.existingQATestCases) disc.gapsDetected.push("No QA test cases found in JIRA comments");
+    if (disc.attachmentResults.filter(a=>a.status==="ok").length===0 && attachItems.length>0) disc.gapsDetected.push("Attachment extraction failed — upload docs manually");
+    const localNotFoundResults = disc.driveResults.filter(d=>d.localNotFound);
+    if (localNotFoundResults.length > 0) {
+      const hint = localNotFoundResults[0]?.hint || "";
+      disc.gapsDetected.push(`Test case sheet not in local Drive. ${hint ? "Save it as: " + hint : "Export the tab as CSV to your Google Drive."}`);
+    } else if (disc.driveResults.some(d=>d.status==="warn" && !d.localNotFound)) {
+      disc.gapsDetected.push("Some Google Drive sheets require login — paste content in gap answers");
+    }
+    if (disc.testCasesFromSheets === "" && allDriveLinks.length === 0) disc.gapsDetected.push("No test case sheet found — provide QA test results in gap answers");
+
+    setDiscovery(disc);
+    setHasDiscovery(true);
+    setDiscoveryLoading(false);
+    log(`✅ Discovery complete`);
   };
 
-  const hasInput = () => {
-    if (jiraMode==="type" && (jiraSubject||jiraDesc)) return true;
-    if (jiraMode==="upload" && jiraFiles.length>0) return true;
-    if (testMode==="type" && testCases) return true;
-    if (testMode==="upload" && testFiles.length>0) return true;
-    if (docsMode==="type" && docsText) return true;
-    if (docsMode==="upload" && docsFiles.length>0) return true;
-    return false;
+  // ── Fetch + Discover (Step 0 → Step 1): always fresh-fetches then runs discovery ──
+  const handleFetchAndDiscover = async () => {
+    const raw = jiraIssueKey.trim();
+    if (!raw) {
+      setJiraFetchError("Enter a JIRA issue key (e.g. TSP-4452) to auto-discover.");
+      return;
+    }
+    setJiraFetchError("");
+    setJiraFetchLoading(true);
+    let payload = null;
+    try {
+      const key = parseJiraIssueKey(raw);
+      const defs = loadPublishDefaults();
+      const site = defs.jiraWriteSite;
+      const siteQs = site && site !== "auto" ? `?site=${encodeURIComponent(site)}` : "";
+      const r = await fetch(`${API_BASE}/api/jira-issue/${encodeURIComponent(raw)}${siteQs}`, { headers: { Accept: "application/json" } });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `JIRA error ${r.status}`);
+      payload = d;
+      setLastJiraPayload(d);
+      setJiraSubject(d.summary ? `${d.id} — ${d.summary}` : d.id || raw);
+      const descParts = [
+        d.description,
+        d.acceptanceCriteria ? `Acceptance Criteria:\n${d.acceptanceCriteria}` : "",
+        d.requirement ? `Requirement:\n${d.requirement}` : "",
+        d.fundlossRisk ? `Fund Loss / Risk:\n${d.fundlossRisk}` : "",
+      ].filter(Boolean);
+      setJiraDesc(descParts.join("\n\n") || "(No description)");
+      syncPublishDefaultJiraKey(d.id || key);
+      syncPublishJiraSiteFromIssue(d);
+    } catch (e) {
+      setJiraFetchError(e.message || "JIRA fetch failed");
+      setJiraFetchLoading(false);
+      return;
+    }
+    setJiraFetchLoading(false);
+    // Run auto-discovery on fresh payload
+    await handleRunDiscovery(payload);
+    setStep(1);
   };
 
-  const callClaude = async (systemPrompt, userMessage, maxTokens = 8000) => {
-    const res = await fetch(`${API_BASE}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system: systemPrompt,
-        messages: [{ role: "user", content: userMessage }],
-        max_tokens: maxTokens,
-        agent: "UAT",
-        llmProvider: getLlmProviderForRequest(),
-        llmDisabled: getLlmDisabledForRequest(),
-        bedrockModelTier: getBedrockModelTierForRequest(),
-        ...getLlmRoutingExtras(),
-      }),
-    });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = {}; }
-    if (!res.ok || data.error) throw new Error(data.message || data.error?.message || `Request failed: ${res.status}`);
-    const payload = data.data ?? data;
-    const blocks = payload?.content;
-    if (!Array.isArray(blocks)) throw new Error("Unexpected LLM response shape");
-    return blocks.filter(b => b.type === "text").map(b => b.text || "").join("\n");
-  };
-
-  // Step 1 → Step 2: get clarify questions + draft objective
+  // ── Step 1 → 2: Clarify ────────────────────────────────────────────────────
   const handleProceedToClarify = async () => {
-    if (!hasInput()) { setStatusMsg("Please provide at least one input."); return; }
+    if (!hasInput() && !discovery) { setStatusMsg("Please provide at least one input."); return; }
     if (!selectedDomains.length) { setStatusMsg("Please select at least one domain."); return; }
     setLoading(true); setStatusMsg("Analyzing inputs & drafting objective...");
     try {
       const ctx = truncateForLLM(buildContext(), MAX_CLARIFY_USER_CHARS);
       const raw = await callClaude(CLARIFY_SYSTEM, ctx, 3500);
       setClarifyRaw(raw);
-      // parse draft objective
       const objMatch = raw.match(/DRAFT_OBJECTIVE:\s*([\s\S]*?)(?=QUESTIONS:|$)/i);
       const draft = objMatch ? objMatch[1].trim() : "";
       setDraftObjective(draft);
       setEditedObjective(draft);
-      setStep(1);
+      setStep(hasDiscovery ? 2 : 1);
       setStatusMsg("");
     } catch(e) { setStatusMsg("Error: "+e.message); }
     finally { setLoading(false); }
   };
 
-  // Step 2 → Step 3: review
-  const handleProceedToReview = () => { setStep(2); };
+  // ── Step 2 → 3: Review ────────────────────────────────────────────────────
+  const handleProceedToReview = () => { setStep(hasDiscovery ? 3 : 2); };
 
-  // Step 3 → Generate
+  // ── Step 3 → Generate ─────────────────────────────────────────────────────
   const handleGenerate = async () => {
     setLoading(true); setStatusMsg("Generating UAT Signoff...");
     try {
-      const ctx = buildContext();
-      let userMsg = ctx;
+      let userMsg = buildContext();
       if (clarifyAnswers.trim()) userMsg += `\nClarification Answers:\n${clarifyAnswers}\n`;
       if (feedbackMemory.length > 0) userMsg += `\nREMEMBERED FEEDBACK FROM PREVIOUS UATs (apply these improvements):\n${feedbackMemory.map(f => `- ${f}`).join("\n")}\n`;
       userMsg = truncateForLLM(userMsg, MAX_GENERATE_USER_CHARS);
@@ -624,17 +861,31 @@ export default function TestSentinel() {
         signoff
       });
       setResult({ signoff, id:entry.id, domains:entry.domains });
-      setStep(3);
+      setStep(hasDiscovery ? 4 : 3);
       setView("result");
       setStatusMsg("");
+      // Track local Drive files used — offer cleanup after UAT
+      if (discovery?.driveResults) {
+        const localFiles = discovery.driveResults
+          .filter(d => d.source === "local" && d.filePath)
+          .map(d => ({ path: d.filePath, name: d.filePath.split("/").pop(), deleted: false }));
+        if (localFiles.length > 0) {
+          setLocalDriveCleanupFiles(localFiles);
+          setCleanupStatus(null);
+          setCleanupConfirming(false);
+        }
+      }
+      // Background .md export
       void exportAgentOutput({
         agent: "UAT",
         jiraId: jiraKey || "NOJIRA",
         subject: jiraSubject || "UAT-Signoff",
         content: signoff,
         steps: [
-          "Build UAT context (JIRA attachments, domains, objective)",
-          "LLM: UAT signoff document",
+          "Fetch JIRA ticket + auto-discover attachments & Drive links",
+          "Extract text from attachments, fetch Google Sheets test cases",
+          "Gap analysis + clarify + objective confirmation",
+          "LLM: UAT signoff document with discrepancy analysis",
           "Save to UAT history",
         ],
         input: userMsg,
@@ -652,7 +903,25 @@ export default function TestSentinel() {
     finally { setLoading(false); }
   };
 
-  // Feedback → regenerate
+  // ── On-demand discrepancy analysis ────────────────────────────────────────
+  const handleDiscrepancyAnalysis = async () => {
+    if (!result?.signoff) return;
+    setDiscrepancyLoading(true);
+    try {
+      const qaContext = [
+        discovery?.existingQATestCases ? `JIRA Comments / QA Test Cases:\n${discovery.existingQATestCases}` : "",
+        discovery?.testCasesFromSheets ? `Google Sheets Test Cases:\n${discovery.testCasesFromSheets}` : "",
+        testCases ? `Additional Test Cases Pasted:\n${testCases}` : "",
+      ].filter(Boolean).join("\n\n");
+
+      const userMsg = `UAT Signoff:\n${result.signoff.slice(0, 8000)}\n\n---\n\nQA / Dev Test Cases:\n${qaContext || "No QA test cases provided."}`;
+      const analysis = await callClaude(DISCREPANCY_SYSTEM, userMsg, 4000);
+      setDiscrepancyResult(analysis);
+    } catch(e) { setDiscrepancyResult(`Error: ${e.message}`); }
+    finally { setDiscrepancyLoading(false); }
+  };
+
+  // ── Feedback → regenerate ─────────────────────────────────────────────────
   const handleFeedback = async () => {
     if (!feedbackText.trim() && feedbackFiles.length===0) return;
     setFeedbackLoading(true);
@@ -674,16 +943,13 @@ export default function TestSentinel() {
         signoff: improved
       });
       setResult({ signoff:improved, id:entry.id, domains:result.domains });
+      setDiscrepancyResult(null); // reset discrepancy on revision
       void exportAgentOutput({
         agent: "UAT",
         jiraId: jiraKey || "NOJIRA",
         subject: (jiraSubject || "UAT-Signoff") + "-revised",
         content: improved,
-        steps: [
-          "Apply user feedback to prior signoff",
-          "LLM: revised UAT signoff",
-          "Update UAT history",
-        ],
+        steps: ["Apply user feedback to prior signoff", "LLM: revised UAT signoff"],
         input: fbCtx,
       });
       const fbSummary = feedbackMode === "type" ? feedbackText.trim() : feedbackFC.map(f => `[${f.name}] ${f.content.slice(0, 100)}`).join("; ");
@@ -702,6 +968,79 @@ export default function TestSentinel() {
     finally { setFeedbackLoading(false); }
   };
 
+  // ── Build context ─────────────────────────────────────────────────────────
+  const buildContext = () => {
+    const doms = AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id));
+    const scope = doms.map(d=>d.full).join(", ")||"All Services";
+    let ctx = `UAT Scope: ${scope}\n\n`;
+
+    if (discovery?.jiraFields) {
+      const f = discovery.jiraFields;
+      ctx += `JIRA ID: ${f.id || ""}\n`;
+      ctx += `Feature: ${f.summary || ""}\n`;
+      if (f.reporter) ctx += `Reporter: ${f.reporter}\n`;
+      if (f.assignee) ctx += `Assignee: ${f.assignee}\n`;
+      if (f.fixVersions) ctx += `Fix Version: ${f.fixVersions}\n`;
+      if (f.labels) ctx += `Labels: ${f.labels}\n`;
+      if (f.components) ctx += `Components: ${f.components}\n`;
+      if (f.status) ctx += `Status: ${f.status}\n`;
+      if (f.priority) ctx += `Priority: ${f.priority}\n`;
+      ctx += "\n";
+    }
+
+    if (jiraMode==="type") {
+      if (jiraSubject) ctx += `JIRA Subject: ${jiraSubject}\n`;
+      if (jiraDesc) ctx += `JIRA Description:\n${jiraDesc}\n\n`;
+    } else {
+      jiraFC.forEach(f=>{ ctx+=`JIRA File [${f.name}]:\n${f.content}\n\n`; });
+    }
+
+    // Extracted attachment text
+    if (discovery?.attachmentResults) {
+      const extracted = discovery.attachmentResults.filter(a=>a.status==="ok");
+      extracted.forEach(a=>{
+        ctx += `\n--- Attachment: ${a.filename} ---\n${a.text}\n`;
+      });
+    }
+
+    // Google Sheets test cases
+    if (discovery?.testCasesFromSheets) {
+      ctx += `\n--- Google Sheets Test Cases ---\n${discovery.testCasesFromSheets}\n`;
+    }
+
+    // Existing QA test cases from JIRA comments
+    if (discovery?.existingQATestCases) {
+      ctx += `\n--- QA / Dev Test Cases (from JIRA comments) ---\n${discovery.existingQATestCases}\n`;
+    }
+
+    // Gap answers
+    if (gapMode==="type" && gapAnswers.trim()) {
+      ctx += `\n--- Gap Answers / Additional Context ---\n${gapAnswers}\n`;
+    } else {
+      gapFC.forEach(f=>{ ctx+=`Gap Doc [${f.name}]:\n${f.content}\n\n`; });
+    }
+
+    // Legacy test cases input
+    if (testMode==="type") { if(testCases) ctx+=`Additional Test Cases:\n${testCases}\n\n`; }
+    else testFC.forEach(f=>{ ctx+=`Test Cases File [${f.name}]:\n${f.content}\n\n`; });
+
+    if (docsMode==="type") { if(docsText) ctx+=`Supporting Context:\n${docsText}\n\n`; }
+    else docsFC.forEach(f=>{ ctx+=`Supporting Doc [${f.name}]:\n${f.content}\n\n`; });
+
+    return ctx;
+  };
+
+  const hasInput = () => {
+    if (jiraMode==="type" && (jiraSubject||jiraDesc)) return true;
+    if (jiraMode==="upload" && jiraFiles.length>0) return true;
+    if (testMode==="type" && testCases) return true;
+    if (testMode==="upload" && testFiles.length>0) return true;
+    if (docsMode==="type" && docsText) return true;
+    if (docsMode==="upload" && docsFiles.length>0) return true;
+    if (discovery) return true;
+    return false;
+  };
+
   const resetAll = () => {
     setStep(0); setJiraSubject(""); setJiraDesc(""); setJiraFiles([]); setJiraFC([]);
     setTestCases(""); setTestFiles([]); setTestFC([]); setDocsText(""); setDocsFiles([]); setDocsFC([]);
@@ -709,324 +1048,393 @@ export default function TestSentinel() {
     setClarifyAnswers(""); setResult(null); setStatusMsg(""); setFeedbackText(""); setFeedbackFiles([]); setFeedbackFC([]);
     setJiraMode("type"); setTestMode("type"); setDocsMode("type"); setFeedbackMode("type");
     setJiraIssueKey(""); setJiraFetchError(""); setLastJiraPayload(null);
+    setDiscovery(null); setDiscoveryLoading(false); setDiscoveryLog([]); setHasDiscovery(false);
+    setGapAnswers(""); setGapMode("type"); setGapFiles([]); setGapFC([]);
+    setDiscrepancyResult(null); setDiscrepancyLoading(false);
     setAllowAutoPublish(false);
+    setLocalDriveCleanupFiles([]); setCleanupStatus(null); setCleanupConfirming(false);
   };
 
   const INPUT_MODES = [{id:"type",icon:"⌨️",label:"Type / Paste"},{id:"upload",icon:"📎",label:"Upload File"}];
-
-  // ── Shared textarea / input style ─────────────────────────────────────────
   const inp = { width:"100%", background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:"10px 14px", fontSize:12, outline:"none", boxSizing:"border-box", fontFamily:C.mono, resize:"vertical", transition:"border 0.2s, box-shadow 0.2s" };
   const lbl = { display:"block", fontSize:10, fontWeight:700, color:C.muted, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:7, fontFamily:C.font };
 
-  // ── VIEWS ─────────────────────────────────────────────────────────────────
-  const HomeView = () => (
-    <div className="fade-in">
-      {/* Hero */}
-      <div style={{ textAlign:"center", padding:"52px 0 40px", position:"relative" }}>
-        <div style={{ fontSize:52, marginBottom:16, filter:"drop-shadow(0 0 24px #e8b84b44)" }}>🛡️</div>
-        <h1 style={{ fontFamily:C.font, fontWeight:800, fontSize:"2.4em", margin:"0 0 8px", letterSpacing:"-0.03em", background:`linear-gradient(135deg, ${C.gold} 30%, #f8fafc)`, WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>
-          TestSentinel
-        </h1>
-        <p style={{ color:C.muted, fontSize:13, margin:"0 0 32px", fontFamily:C.mono }}>
-          UAT Signoff Agent · Domain-Scoped · RAG-enabled · Multi-model
-        </p>
-        <Btn size="lg" onClick={()=>{resetAll();setView("new");}}>
-          ⚡ Start New UAT Session
-        </Btn>
-        {feedbackMemory.length > 0 && (
-          <div style={{ marginTop:16, display:"inline-flex", alignItems:"center", gap:8, background:"#052E16", border:"1px solid #16A34A22", borderRadius:9, padding:"8px 14px" }}>
-            <span style={{ fontSize:11, color:"#4ADE80", fontWeight:600 }}>🧠 {feedbackMemory.length} feedback item{feedbackMemory.length>1?"s":""} remembered</span>
-            <button type="button" onClick={()=>setFeedbackMemory([])} style={{ background:"none", border:"1px solid #EF444433", borderRadius:6, padding:"2px 8px", color:"#EF4444", fontSize:10, cursor:"pointer" }}>Clear</button>
+  // ── Step 0: Input view ───────────────────────────────────────────────────
+  const renderStep0 = () => (
+    <div className="fade-in" role="presentation" onKeyDown={(e)=>{ if (e.key==="Enter" && e.target.tagName!=="TEXTAREA") e.preventDefault(); }}>
+      {/* JIRA Connector — Primary Input */}
+      <Card style={{ marginBottom:16, border:`1px solid #60a5fa44` }}>
+        <SectionHeader icon="🔵" title="JIRA Connector" tag="Auto-Discovery" tagColor="#60a5fa"/>
+        <div style={{ padding:18 }}>
+          <p style={{ fontSize:12, color:C.muted, margin:"0 0 14px", fontFamily:C.font, lineHeight:1.6 }}>
+            Enter a JIRA ticket ID to auto-fetch the ticket, extract attachments (BRD/PRD), find Google Drive test case sheets, and surface gap questions.
+          </p>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", marginBottom:10 }}>
+            <input
+              type="text"
+              placeholder="e.g. TSP-4452 or TPAP-1234 or paste JIRA URL"
+              value={jiraIssueKey}
+              onChange={(e)=>setJiraIssueKey(e.target.value)}
+              onBlur={()=>{ const k = parseJiraIssueKey(jiraIssueKey); if (k) syncPublishDefaultJiraKey(k); }}
+              onKeyDown={(e)=>{ if (e.key==="Enter") { e.preventDefault(); handleFetchJiraUAT(); } }}
+              style={{ flex:1, minWidth:240, ...inp }}
+            />
+            <button type="button" onClick={handleFetchJiraUAT} disabled={jiraFetchLoading} style={{ padding:"9px 16px", borderRadius:8, fontSize:12, fontWeight:600, cursor: jiraFetchLoading?"wait":"pointer", border:"none", background:"#0052CC", color:"#fff", minWidth:80 }}>
+              {jiraFetchLoading ? <Spinner size={13}/> : "↓ Fetch"}
+            </button>
           </div>
+          {jiraFetchError && <div style={{ marginTop:8, fontSize:11, color:"#f87171", fontFamily:C.mono }}>{jiraFetchError}</div>}
+          {lastJiraPayload && (
+            <div style={{ marginTop:12, padding:14, background:C.surface, borderRadius:8 }}>
+              <JiraConnectorFetchSummary data={lastJiraPayload} />
+              {lastJiraPayload.acceptanceCriteria && (
+                <div style={{ marginTop:10, fontSize:11, color:C.muted, fontFamily:C.mono }}>
+                  {(() => { const ac = String(lastJiraPayload.acceptanceCriteria); return (<><strong style={{color:C.text}}>AC Preview:</strong> {ac.slice(0,200)}{ac.length>200?"…":""}</>); })()}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      {/* Domain Scope */}
+      <Card style={{ marginBottom:16 }}>
+        <SectionHeader icon="🎯" title="UAT Domain Scope" tag="Required" tagColor="#f87171"/>
+        <div style={{ padding:18 }}>
+          <AgentDomainMultiSelect
+            label="Domains"
+            value={selectedDomains}
+            onChange={setSelectedDomains}
+            domains={AGENT_DOMAIN_ENTRIES}
+            colors={{ surface: C.surface, elevated: C.elevated, border: C.border, text: C.text, muted: C.muted, accent: C.gold }}
+          />
+        </div>
+      </Card>
+
+      {/* Manual JIRA Details — shown if no Jira key or want to override */}
+      <Card style={{ marginBottom:16 }}>
+        <SectionHeader icon="📝" title="Manual Input (override / no JIRA)" tag="Optional" tagColor={C.muted}/>
+        <div style={{ padding:18 }}>
+          <ModeTab modes={INPUT_MODES} active={jiraMode} onChange={setJiraMode}/>
+          {jiraMode==="type" ? (
+            <>
+              <div style={{ marginBottom:12 }}>
+                <label style={lbl}>Feature Name / JIRA Subject</label>
+                <input style={{...inp, resize:"none"}} placeholder="e.g. TSP-3516 — Silent Mobile Verification (SMV)" value={jiraSubject} onChange={e=>setJiraSubject(e.target.value)}/>
+              </div>
+              <label style={lbl}>Description & Acceptance Criteria</label>
+              <textarea style={{...inp, minHeight:90}} placeholder="Paste full description, acceptance criteria..." value={jiraDesc} onChange={e=>setJiraDesc(e.target.value)}/>
+            </>
+          ) : (
+            <><input ref={jiraRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setJiraFiles,setJiraFC)}/>
+            <Dropzone fileRef={jiraRef} onDrop={fl=>addFiles(fl,setJiraFiles,setJiraFC)} onBrowse={()=>jiraRef.current.click()} files={jiraFiles} onRemove={i=>removeFile(i,setJiraFiles,setJiraFC)} hint="JIRA export, Word doc, or ticket details file"/></>
+          )}
+        </div>
+      </Card>
+
+      {/* Additional Context */}
+      <Card style={{ marginBottom:16 }}>
+        <SectionHeader icon="🧪" title="Additional Test Cases & Context" tag="Optional" tagColor="#34d399"/>
+        <div style={{ padding:18 }}>
+          <ModeTab modes={INPUT_MODES} active={testMode} onChange={setTestMode}/>
+          {testMode==="type" ? (
+            <>
+              <label style={lbl}>Test Cases / Results / Logs</label>
+              <textarea style={{...inp, minHeight:90}} placeholder={"TC_001 | SMV Device Binding | PASS\nTC_002 | Invalid OTP | FAIL"} value={testCases} onChange={e=>setTestCases(e.target.value)}/>
+            </>
+          ) : (
+            <><input ref={testRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setTestFiles,setTestFC)}/>
+            <Dropzone fileRef={testRef} onDrop={fl=>addFiles(fl,setTestFiles,setTestFC)} onBrowse={()=>testRef.current.click()} files={testFiles} onRemove={i=>removeFile(i,setTestFiles,setTestFC)} hint="Excel test plan, CSV results, PDF test report"/></>
+          )}
+          <div style={{ marginTop:14 }}>
+            <ModeTab modes={INPUT_MODES} active={docsMode} onChange={setDocsMode}/>
+            {docsMode==="type" ? (
+              <>
+                <label style={lbl}>Supporting Docs / NPCI Comms</label>
+                <textarea style={{...inp, minHeight:70}} placeholder="NPCI circular refs, release notes, known issues..." value={docsText} onChange={e=>setDocsText(e.target.value)}/>
+              </>
+            ) : (
+              <><input ref={docsRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setDocsFiles,setDocsFC)}/>
+              <Dropzone fileRef={docsRef} onDrop={fl=>addFiles(fl,setDocsFiles,setDocsFC)} onBrowse={()=>docsRef.current.click()} files={docsFiles} onRemove={i=>removeFile(i,setDocsFiles,setDocsFC)} hint="NPCI documents, compliance specs, SRS"/></>
+            )}
+          </div>
+        </div>
+      </Card>
+
+      {/* Options */}
+      <Card style={{ padding:"16px 20px", marginBottom:16 }}>
+        <div style={{ display:"flex", gap:28, alignItems:"center", flexWrap:"wrap" }}>
+          <span style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font }}>Options</span>
+          <Toggle on={webSearch} onChange={setWebSearch} icon="🌐" label="Enable Web Search (NPCI / RBI docs)"/>
+        </div>
+        <div style={{ marginTop:14, paddingTop:14, borderTop:`1px solid ${C.border}` }}>
+          <div style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:10 }}>After generation, auto-publish to</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:16 }}>
+            {["jira","telegram","email","slack"].map((ch) => (
+              <label key={ch} style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", fontSize:12, color:C.text }}>
+                <input type="checkbox" checked={!!autoPublishChannels[ch]} onChange={(e)=>setAutoPublishChannels((p)=>({ ...p, [ch]: e.target.checked }))} />
+                {ch==="jira"&&"JIRA"}{ch==="telegram"&&"Telegram"}{ch==="email"&&"Email"}{ch==="slack"&&"Slack"}
+              </label>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {statusMsg && <div style={{ background:"#f59e0b18", border:"1px solid #f59e0b44", borderRadius:8, padding:"10px 16px", marginBottom:14, fontSize:12, color:C.gold, fontFamily:C.mono }}>{statusMsg}</div>}
+
+      <div style={{ display:"flex", gap:12 }}>
+        {lastJiraPayload ? (
+          <Btn style={{ flex:1 }} size="lg" onClick={handleFetchAndDiscover} disabled={discoveryLoading}>
+            {discoveryLoading ? <><Spinner/> &nbsp;Discovering...</> : "🔍 Discover & Continue →"}
+          </Btn>
+        ) : (
+          <Btn style={{ flex:1 }} size="lg" onClick={handleProceedToClarify} disabled={loading}>
+            {loading ? <><Spinner/> &nbsp;Analyzing...</> : "Next: Clarify →"}
+          </Btn>
         )}
+        <Btn variant="ghost" onClick={()=>{resetAll();setView("home");}}>Cancel</Btn>
       </div>
-
-      {/* Stats */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:24 }}>
-        {[
-          { icon:"📋", label:"Sessions", value: getHistory().length||"—", sub:"total performed" },
-          { icon:"📅", label:"Last 30 Days", value: getHistory().filter(h=>new Date(h.ts)>new Date(Date.now()-30*86400000)).length||"—", sub:"UATs completed" },
-          { icon:"✅", label:"Quick Action", value:"New UAT", sub:"click to start", action:()=>{resetAll();setView("new");} },
-        ].map((s,i)=>(
-          <Card key={i} className="hover-lift" style={{ padding:20, textAlign:"center", cursor:s.action?"pointer":"default", transition:"all 0.2s", marginBottom:0 }} onClick={s.action}>
-            <div style={{ fontSize:24, marginBottom:8 }}>{s.icon}</div>
-            <div style={{ fontFamily:C.font, fontWeight:800, fontSize:"1.6em", color:C.gold, marginBottom:2 }}>{s.value}</div>
-            <div style={{ fontSize:11, color:C.text, fontWeight:600, fontFamily:C.font }}>{s.label}</div>
-            <div style={{ fontSize:10, color:C.muted, marginTop:2, fontFamily:C.mono }}>{s.sub}</div>
-          </Card>
-        ))}
-      </div>
-
-      {/* Domain quick ref */}
-      <Card style={{ marginBottom:18 }}>
-        <SectionHeader icon="🎯" title="Supported UAT Domains" />
-        <div style={{ padding:18, display:"flex", flexWrap:"wrap", gap:8 }}>
-          {AGENT_DOMAIN_ENTRIES.map((d) => (
-            <div key={d.id} style={{ display:"flex", alignItems:"center", gap:6, background:`${d.color}12`, border:`1px solid ${d.color}22`, borderRadius:7, padding:"6px 12px" }}>
-              <span>{d.icon}</span>
-              <span style={{ fontSize:11, color:d.color, fontWeight:700, fontFamily:C.font }}>{d.label}</span>
-              <span style={{ fontSize:10, color:C.muted, fontFamily:C.mono }}>{d.full}</span>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      {/* Channels */}
-      <Card>
-        <SectionHeader icon="📡" title="Integration Channels" />
-        <div style={{ padding:18, display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
-          {[
-            { icon:"💬", name:"Slack", cmd:"/testsentinel", status:"Connected", color:"#22c55e" },
-            { icon:"📱", name:"WhatsApp", cmd:"Hey TestSentinel", status:"Setup pending", color:C.gold },
-            { icon:"🌐", name:"Browser", cmd:"Active now ✓", status:"Live", color:"#60a5fa" },
-          ].map((ch,i)=>(
-            <div key={i} style={{ background:C.surface, borderRadius:9, padding:14, border:`1px solid ${C.border}` }}>
-              <div style={{ fontSize:20 }}>{ch.icon}</div>
-              <div style={{ fontWeight:700, color:C.text, fontSize:12, marginTop:6, fontFamily:C.font }}>{ch.name}</div>
-              <div style={{ color:`${ch.color}`, fontSize:10, marginTop:4, fontFamily:C.mono }}>{ch.cmd}</div>
-              <Tag color={ch.color}>{ch.status}</Tag>
-            </div>
-          ))}
-        </div>
-      </Card>
     </div>
   );
 
-  const renderNewSession = () => (
+  // ── Step 1: Discovery view ───────────────────────────────────────────────
+  const renderStep1 = () => (
     <div className="fade-in">
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24, flexWrap:"wrap", gap:12 }}>
-        <div>
-          <h2 style={{ margin:0, color:C.text, fontFamily:C.font, fontWeight:800, fontSize:"1.3em" }}>New UAT Session</h2>
-          <p style={{ margin:"3px 0 0", color:C.muted, fontSize:11, fontFamily:C.mono }}>Fill inputs → clarify → confirm objective → generate signoff</p>
+      <Card style={{ marginBottom:16, border:`1px solid #60a5fa44` }}>
+        <SectionHeader icon="🔬" title="Jira Intelligence — Discovery Results" tag={discovery ? "Complete" : "Running"} tagColor={discovery ? "#34d399" : "#60a5fa"}/>
+        <div style={{ padding:18 }}>
+          {discoveryLoading && (
+            <div style={{ marginBottom:16 }}>
+              <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:10 }}>
+                <Spinner/>
+                <span style={{ fontSize:12, color:C.gold, fontFamily:C.mono }}>Running auto-discovery...</span>
+              </div>
+              <div style={{ background:C.surface, borderRadius:8, padding:12, maxHeight:160, overflow:"auto" }}>
+                {discoveryLog.map((l,i)=>(
+                  <div key={i} style={{ fontSize:11, color:C.muted, fontFamily:C.mono, marginBottom:3 }}>{l}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {discovery && (
+            <>
+              {/* JIRA Fields Summary */}
+              <div style={{ marginBottom:16 }}>
+                <div style={{ fontSize:11, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:10 }}>📋 JIRA Ticket Summary</div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(200px, 1fr))", gap:8 }}>
+                  {[
+                    { k:"ID", v:discovery.jiraFields.id },
+                    { k:"Reporter", v:discovery.jiraFields.reporter },
+                    { k:"Assignee", v:discovery.jiraFields.assignee },
+                    { k:"Fix Version", v:discovery.jiraFields.fixVersions || "—" },
+                    { k:"Labels", v:discovery.jiraFields.labels || "—" },
+                    { k:"Status", v:discovery.jiraFields.status },
+                    { k:"Priority", v:discovery.jiraFields.priority },
+                    { k:"Components", v:discovery.jiraFields.components || "—" },
+                  ].map(({k,v})=>(
+                    <div key={k} style={{ background:C.surface, borderRadius:7, padding:"8px 12px" }}>
+                      <div style={{ fontSize:9, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font }}>{k}</div>
+                      <div style={{ fontSize:12, color:C.text, fontFamily:C.mono, marginTop:2 }}>{v || "—"}</div>
+                    </div>
+                  ))}
+                </div>
+                {discovery.jiraFields.acceptanceCriteria && (
+                  <div style={{ marginTop:10, background:`${C.gold}08`, border:`1px solid ${C.gold}22`, borderRadius:8, padding:12 }}>
+                    <div style={{ fontSize:10, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:6 }}>Acceptance Criteria Found</div>
+                    <div style={{ fontSize:11, color:C.subtle, fontFamily:C.mono, lineHeight:1.6, whiteSpace:"pre-wrap" }}>{(() => { const ac = String(discovery.jiraFields.acceptanceCriteria); return ac.slice(0,600) + (ac.length>600?"…":""); })()}</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Attachment Results */}
+              <div style={{ marginBottom:16 }}>
+                <div style={{ fontSize:11, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:8 }}>📎 Attachments</div>
+                {discovery.attachmentResults.length === 0 ? (
+                  <div style={{ fontSize:11, color:C.muted, fontFamily:C.mono }}>No attachments found in JIRA ticket.</div>
+                ) : (
+                  discovery.attachmentResults.map((a,i)=>(
+                    <DiscoveryRow key={i}
+                      icon={/pdf/i.test(a.filename)?"📄":/docx/i.test(a.filename)?"📝":"📎"}
+                      label={a.filename}
+                      status={a.status}
+                      detail={a.status==="ok" ? `${a.chars.toLocaleString()} characters extracted` : a.status==="skip" ? "Not a document file — skipped" : a.error || ""}
+                    />
+                  ))
+                )}
+              </div>
+
+              {/* Drive Link Results */}
+              <div style={{ marginBottom:16 }}>
+                <div style={{ fontSize:11, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:8 }}>🔗 Google Drive / Sheets Links</div>
+                {discovery.driveResults.length === 0 ? (
+                  <div style={{ fontSize:11, color:C.muted, fontFamily:C.mono }}>No Google Drive links found in JIRA ticket.</div>
+                ) : (
+                  discovery.driveResults.map((d,i)=>(
+                    <DiscoveryRow key={i}
+                      icon={d.type==="sheet"?"📊":"📄"}
+                      label={d.url.slice(0, 60) + (d.url.length > 60 ? "…" : "")}
+                      status={d.status}
+                      detail={d.status==="ok" ? `${(d.chars||0).toLocaleString()} characters fetched` : d.error || ""}
+                    />
+                  ))
+                )}
+              </div>
+
+              {/* QA Test Cases from Comments */}
+              <div style={{ marginBottom:16 }}>
+                <div style={{ fontSize:11, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:8 }}>💬 QA Test Cases (from JIRA Comments)</div>
+                {discovery.existingQATestCases ? (
+                  <div style={{ background:C.surface, borderRadius:8, padding:12, fontSize:11, color:C.muted, fontFamily:C.mono, maxHeight:120, overflow:"auto", lineHeight:1.6 }}>
+                    {discovery.existingQATestCases.slice(0, 500)}{discovery.existingQATestCases.length>500?"…":""}
+                  </div>
+                ) : (
+                  <div style={{ fontSize:11, color:"#fbbf24", fontFamily:C.mono }}>⚠️ No QA test cases found in JIRA comments.</div>
+                )}
+              </div>
+
+              {/* Detected Gaps */}
+              {discovery.gapsDetected.length > 0 && (
+                <div style={{ background:"#f59e0b10", border:"1px solid #f59e0b33", borderRadius:8, padding:14, marginBottom:16 }}>
+                  <div style={{ fontSize:11, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:8 }}>❓ Detected Gaps — Please Address Below</div>
+                  {discovery.gapsDetected.map((g,i)=>(
+                    <div key={i} style={{ display:"flex", gap:8, fontSize:11, color:C.subtle, fontFamily:C.mono, marginBottom:4 }}>
+                      <span style={{ color:"#fbbf24" }}>▸</span> {g}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
-        <ModelPicker selected={model} onChange={setModel}/>
+      </Card>
+
+      {/* Gap Fill */}
+      <Card style={{ marginBottom:16 }}>
+        <SectionHeader icon="💬" title="Gap Answers & Additional Context" tag="Fill Missing Info" tagColor="#a78bfa"/>
+        <div style={{ padding:18 }}>
+          <p style={{ fontSize:12, color:C.muted, margin:"0 0 14px", fontFamily:C.font, lineHeight:1.7 }}>
+            Provide any missing info: environment details, test results, QA test case IDs, Wiki links, or paste Google Sheet content if login was required.
+          </p>
+          <ModeTab modes={INPUT_MODES} active={gapMode} onChange={setGapMode}/>
+          {gapMode==="type" ? (
+            <>
+              <label style={lbl}>Gap Answers / Context / Wiki URL / Pasted Sheet</label>
+              <textarea style={{...inp, minHeight:120}} placeholder={"TC_001 PASS - Login flow verified\nTC_002 FAIL - OTP timeout bug #204\nEnvironment: UAT-1 | Build: v2.4.1\nhttps://wiki.internal/page/feature-spec"} value={gapAnswers} onChange={e=>setGapAnswers(e.target.value)}/>
+            </>
+          ) : (
+            <><input ref={gapRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setGapFiles,setGapFC)}/>
+            <Dropzone fileRef={gapRef} onDrop={fl=>addFiles(fl,setGapFiles,setGapFC)} onBrowse={()=>gapRef.current.click()} files={gapFiles} onRemove={i=>removeFile(i,setGapFiles,setGapFC)} hint="Test results, QA sheet export, Wiki export, BRD/PRD doc"/></>
+          )}
+        </div>
+      </Card>
+
+      <div style={{ display:"flex", gap:12 }}>
+        <Btn style={{ flex:1 }} size="lg" onClick={handleProceedToClarify} disabled={loading || discoveryLoading}>
+          {loading ? <><Spinner/> &nbsp;Analyzing...</> : "Next: Clarify & Set Objective →"}
+        </Btn>
+        <Btn variant="ghost" onClick={()=>setStep(0)}>← Back</Btn>
       </div>
-
-      <StepBar step={step}/>
-
-      {/* ── Step 0: Inputs ── */}
-      {step===0 && (
-        <div className="fade-in" role="presentation" onKeyDown={(e)=>{ if (e.key==="Enter" && e.target.tagName!=="TEXTAREA") e.preventDefault(); }}>
-          {/* JIRA Connector */}
-          <Card style={{ marginBottom:16 }}>
-            <SectionHeader icon="🔵" title="JIRA Connector" tag="Fetch issue" tagColor="#60a5fa"/>
-            <div style={{ padding:18 }}>
-              <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-                <input
-                  type="text"
-                  placeholder="e.g. TSP-1889 or paste JIRA browse URL"
-                  value={jiraIssueKey}
-                  onChange={(e)=>setJiraIssueKey(e.target.value)}
-                  onBlur={()=>{ const k = parseJiraIssueKey(jiraIssueKey); if (k) syncPublishDefaultJiraKey(k); }}
-                  onKeyDown={(e)=>{ if (e.key==="Enter") { e.preventDefault(); handleFetchJiraUAT(); } }}
-                  style={{ flex:1, minWidth:200, ...inp }}
-                />
-                <button type="button" onClick={handleFetchJiraUAT} disabled={jiraFetchLoading} style={{ padding:"8px 16px", borderRadius:8, fontSize:12, fontWeight:600, cursor: jiraFetchLoading?"wait":"pointer", border:"none", background:"#0052CC", color:"#fff" }}>
-                  {jiraFetchLoading ? "Fetching…" : "↓ Fetch"}
-                </button>
-              </div>
-              {jiraFetchError && <div style={{ marginTop:8, fontSize:11, color:"#f87171" }}>{jiraFetchError}</div>}
-              {(jiraSubject || jiraDesc) && (
-                <div style={{ marginTop:10, padding:12, background:C.surface, borderRadius:8, fontSize:12, color:C.text }}>
-                  {lastJiraPayload ? (
-                    <JiraConnectorFetchSummary data={lastJiraPayload} />
-                  ) : (
-                    <span style={{ color:"#22c55e", fontWeight:600 }}>JIRA details entered below (manual paste).</span>
-                  )}
-                </div>
-              )}
-              <div style={{ marginTop:8, fontSize:11, color:C.muted }}>Fetch summary & description into JIRA Details. Configure JIRA in Connectors (top bar).</div>
-            </div>
-          </Card>
-
-          {/* Domain Scope */}
-          <Card style={{ marginBottom:16 }}>
-            <SectionHeader icon="🎯" title="UAT Domain Scope" tag="Required" tagColor="#f87171"/>
-            <div style={{ padding:18 }}>
-              <p style={{ fontSize:12, color:C.muted, margin:"0 0 14px", fontFamily:C.font }}>Select domains to scope this UAT. The signoff will be strictly constrained to your selection.</p>
-              <AgentDomainMultiSelect
-                label="Domains"
-                value={selectedDomains}
-                onChange={setSelectedDomains}
-                domains={AGENT_DOMAIN_ENTRIES}
-                colors={{ surface: C.surface, elevated: C.elevated, border: C.border, text: C.text, muted: C.muted, accent: C.gold }}
-              />
-            </div>
-          </Card>
-
-          {/* JIRA */}
-          <Card style={{ marginBottom:16 }}>
-            <SectionHeader icon="🔵" title="JIRA Details" tag="JIRA" tagColor="#60a5fa"/>
-            <div style={{ padding:18 }}>
-              <ModeTab modes={INPUT_MODES} active={jiraMode} onChange={setJiraMode}/>
-              {jiraMode==="type" ? (
-                <>
-                  <div style={{ marginBottom:12 }}>
-                    <label style={lbl}>JIRA Subject / Feature Name</label>
-                    <input style={{...inp, resize:"none"}} placeholder="e.g. TSP-3516 — Silent Mobile Verification (SMV)" value={jiraSubject} onChange={e=>setJiraSubject(e.target.value)}/>
-                  </div>
-                  <label style={lbl}>JIRA Description & Acceptance Criteria</label>
-                  <textarea style={{...inp, minHeight:100}} placeholder="Paste full description, acceptance criteria, environment details..." value={jiraDesc} onChange={e=>setJiraDesc(e.target.value)}/>
-                </>
-              ) : (
-                <><input ref={jiraRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setJiraFiles,setJiraFC)}/>
-                <Dropzone fileRef={jiraRef} onDrop={fl=>addFiles(fl,setJiraFiles,setJiraFC)} onBrowse={()=>jiraRef.current.click()} files={jiraFiles} onRemove={i=>removeFile(i,setJiraFiles,setJiraFC)} hint="JIRA export, Word doc, or ticket details file"/></>
-              )}
-            </div>
-          </Card>
-
-          {/* Test Cases */}
-          <Card style={{ marginBottom:16 }}>
-            <SectionHeader icon="🧪" title="QA Test Cases & Execution Logs" tag="Test Cases" tagColor="#34d399"/>
-            <div style={{ padding:18 }}>
-              <ModeTab modes={INPUT_MODES} active={testMode} onChange={setTestMode}/>
-              {testMode==="type" ? (
-                <>
-                  <label style={lbl}>Test Cases / Results / Logs</label>
-                  <textarea style={{...inp, minHeight:140}} placeholder={"TC_001 | SMV Device Binding | PASS | Registered successfully\nTC_002 | Invalid OTP        | FAIL | Error code mismatch\nTC_003 | Timeout scenario   | BLOCKED | Env issue"} value={testCases} onChange={e=>setTestCases(e.target.value)}/>
-                </>
-              ) : (
-                <><input ref={testRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setTestFiles,setTestFC)}/>
-                <Dropzone fileRef={testRef} onDrop={fl=>addFiles(fl,setTestFiles,setTestFC)} onBrowse={()=>testRef.current.click()} files={testFiles} onRemove={i=>removeFile(i,setTestFiles,setTestFC)} hint="Excel test plan, CSV results, PDF test report, log file"/></>
-              )}
-            </div>
-          </Card>
-
-          {/* Supporting Docs */}
-          <Card style={{ marginBottom:16 }}>
-            <SectionHeader icon="📄" title="Supporting Documents & Context" tag="Docs" tagColor="#a78bfa"/>
-            <div style={{ padding:18 }}>
-              <ModeTab modes={INPUT_MODES} active={docsMode} onChange={setDocsMode}/>
-              {docsMode==="type" ? (
-                <>
-                  <label style={lbl}>NPCI Comms, Release Notes, Known Issues</label>
-                  <textarea style={{...inp, minHeight:90}} placeholder="NPCI circular refs, release notes, known issues, signoff authority names..." value={docsText} onChange={e=>setDocsText(e.target.value)}/>
-                </>
-              ) : (
-                <><input ref={docsRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setDocsFiles,setDocsFC)}/>
-                <Dropzone fileRef={docsRef} onDrop={fl=>addFiles(fl,setDocsFiles,setDocsFC)} onBrowse={()=>docsRef.current.click()} files={docsFiles} onRemove={i=>removeFile(i,setDocsFiles,setDocsFC)} hint="NPCI documents, compliance specs, SRS, supporting material"/></>
-              )}
-            </div>
-          </Card>
-
-          {/* Options */}
-          <Card style={{ padding:"16px 20px", marginBottom:16 }}>
-            <div style={{ display:"flex", gap:28, alignItems:"center", flexWrap:"wrap" }}>
-              <span style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font }}>Options</span>
-              <Toggle on={webSearch} onChange={setWebSearch} icon="🌐" label="Enable Web Search (NPCI / RBI docs)"/>
-            </div>
-            <div style={{ marginTop:14, paddingTop:14, borderTop:`1px solid ${C.border}` }}>
-              <div style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:10 }}>After generation, auto-publish to</div>
-              <div style={{ display:"flex", flexWrap:"wrap", gap:16 }}>
-                {["jira","telegram","email","slack"].map((ch) => (
-                  <label key={ch} style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", fontSize:12, color:C.text }}>
-                    <input type="checkbox" checked={!!autoPublishChannels[ch]} onChange={(e)=>setAutoPublishChannels((p)=>({ ...p, [ch]: e.target.checked }))} />
-                    {ch==="jira"&&"JIRA"}
-                    {ch==="telegram"&&"Telegram"}
-                    {ch==="email"&&"Email"}
-                    {ch==="slack"&&"Slack"}
-                  </label>
-                ))}
-              </div>
-              <div style={{ fontSize:10, color:C.muted, marginTop:6 }}>Set default destinations in Connectors (top bar).</div>
-            </div>
-          </Card>
-
-          {statusMsg && <div style={{ background:"#f59e0b18", border:"1px solid #f59e0b44", borderRadius:8, padding:"10px 16px", marginBottom:14, fontSize:12, color:C.gold, fontFamily:C.mono }}>{statusMsg}</div>}
-
-          <div style={{ display:"flex", gap:12 }}>
-            <Btn style={{ flex:1 }} size="lg" onClick={handleProceedToClarify} disabled={loading}>
-              {loading ? <><Spinner/> &nbsp;Analyzing...</> : "Next: Clarify & Set Objective →"}
-            </Btn>
-            <Btn variant="ghost" onClick={()=>{resetAll();setView("home");}}>Cancel</Btn>
-          </div>
-        </div>
-      )}
-
-      {/* ── Step 1: Clarify + Objective ── */}
-      {step===1 && (
-        <div className="fade-in">
-          {/* Draft Objective */}
-          <Card style={{ marginBottom:16, border:`1px solid ${C.gold}44` }}>
-            <SectionHeader icon="🎯" title="Objective" tag="Review & Edit" tagColor={C.gold}/>
-            <div style={{ padding:18 }}>
-              <p style={{ fontSize:12, color:C.muted, margin:"0 0 12px", fontFamily:C.font, lineHeight:1.7 }}>
-                TestSentinel drafted the objective below based on your inputs. <strong style={{color:C.text}}>Edit it freely</strong> — this will define the scope boundaries for the signoff.
-              </p>
-              <textarea style={{...inp, minHeight:110, border:`1px solid ${C.gold}44`}} value={editedObjective} onChange={e=>setEditedObjective(e.target.value)} placeholder="Objective will appear here..."/>
-              <div style={{ marginTop:8, display:"flex", gap:8 }}>
-                <Btn variant="outline" size="sm" onClick={()=>setEditedObjective(draftObjective)}>↺ Reset to Draft</Btn>
-              </div>
-            </div>
-          </Card>
-
-          {/* Clarifying Questions */}
-          {clarifyRaw && (() => {
-            const qMatch = clarifyRaw.match(/QUESTIONS:\s*([\s\S]*)/i);
-            const qs = qMatch ? qMatch[1].trim() : "";
-            return qs ? (
-              <Card style={{ marginBottom:16 }}>
-                <SectionHeader icon="💬" title="Clarifying Questions" tag="Optional" tagColor="#94a3b8"/>
-                <div style={{ padding:18 }}>
-                  <div style={{ background:C.surface, borderRadius:8, padding:16, marginBottom:14, fontSize:12, color:C.subtle, lineHeight:2, whiteSpace:"pre-wrap", fontFamily:C.mono, borderLeft:`3px solid ${C.gold}` }}>{qs}</div>
-                  <label style={lbl}>Your Answers (leave blank to skip)</label>
-                  <textarea style={{...inp, minHeight:90}} placeholder="Answer any questions to improve the signoff quality..." value={clarifyAnswers} onChange={e=>setClarifyAnswers(e.target.value)}/>
-                </div>
-              </Card>
-            ) : null;
-          })()}
-
-          <div style={{ display:"flex", gap:12 }}>
-            <Btn style={{ flex:1 }} size="lg" onClick={handleProceedToReview}>
-              Next: Review & Generate →
-            </Btn>
-            <Btn variant="ghost" onClick={()=>setStep(0)}>← Back</Btn>
-          </div>
-        </div>
-      )}
-
-      {/* ── Step 2: Review summary before generating ── */}
-      {step===2 && (
-        <div className="fade-in">
-          <Card style={{ marginBottom:16 }}>
-            <SectionHeader icon="📋" title="Review Before Generating" tag="Final Check" tagColor={C.gold}/>
-            <div style={{ padding:18 }}>
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:16 }}>
-                {[
-                  { label:"Domains", value: AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id)).map((d) => `${d.icon} ${d.label}`).join(", ")||"—" },
-                  { label:"JIRA", value: jiraSubject||(jiraFiles[0]?.name)||"From uploaded file" },
-                  { label:"Test Cases", value: testCases ? `${testCases.split("\n").filter(Boolean).length} lines pasted` : testFiles.length>0 ? `${testFiles.length} file(s)` : "—" },
-                  { label:"Supporting Docs", value: docsText?"Text provided":docsFiles.length>0?`${docsFiles.length} file(s)`:"—" },
-                ].map((r,i)=>(
-                  <div key={i} style={{ background:C.surface, borderRadius:8, padding:"12px 14px", border:`1px solid ${C.border}` }}>
-                    <div style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font }}>{r.label}</div>
-                    <div style={{ fontSize:12, color:C.text, marginTop:5, fontFamily:C.mono, lineHeight:1.5 }}>{r.value}</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ background:`${C.gold}08`, borderRadius:8, padding:"12px 16px", border:`1px solid ${C.gold}22` }}>
-                <div style={{ fontSize:10, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:6 }}>Confirmed Objective</div>
-                <div style={{ fontSize:12, color:C.subtle, fontFamily:C.mono, lineHeight:1.7 }}>{editedObjective||"(No objective set)"}</div>
-              </div>
-            </div>
-          </Card>
-
-          {statusMsg && <div style={{ background:"#f59e0b18", border:"1px solid #f59e0b44", borderRadius:8, padding:"10px 16px", marginBottom:14, fontSize:12, color:C.gold, fontFamily:C.mono }}>{statusMsg}</div>}
-
-          <div style={{ display:"flex", gap:12 }}>
-            <Btn style={{ flex:1 }} size="lg" onClick={handleGenerate} disabled={loading}>
-              {loading ? <><Spinner/> &nbsp;Generating Signoff...</> : "🚀 Generate UAT Signoff"}
-            </Btn>
-            <Btn variant="ghost" onClick={()=>setStep(1)}>← Back</Btn>
-          </div>
-        </div>
-      )}
     </div>
   );
 
+  // ── Step 2 (or 1 if no discovery): Clarify + Objective ───────────────────
+  const renderStepClarify = () => (
+    <div className="fade-in">
+      <Card style={{ marginBottom:16, border:`1px solid ${C.gold}44` }}>
+        <SectionHeader icon="🎯" title="Objective" tag="Review & Edit" tagColor={C.gold}/>
+        <div style={{ padding:18 }}>
+          <p style={{ fontSize:12, color:C.muted, margin:"0 0 12px", fontFamily:C.font, lineHeight:1.7 }}>
+            TestSentinel drafted the objective below. <strong style={{color:C.text}}>Edit freely</strong> — this defines scope for the signoff.
+          </p>
+          <textarea style={{...inp, minHeight:110, border:`1px solid ${C.gold}44`}} value={editedObjective} onChange={e=>setEditedObjective(e.target.value)} placeholder="Objective will appear here..."/>
+          <div style={{ marginTop:8 }}>
+            <Btn variant="outline" size="sm" onClick={()=>setEditedObjective(draftObjective)}>↺ Reset to Draft</Btn>
+          </div>
+        </div>
+      </Card>
+
+      {clarifyRaw && (() => {
+        const qMatch = clarifyRaw.match(/QUESTIONS:\s*([\s\S]*)/i);
+        const qs = qMatch ? qMatch[1].trim() : "";
+        return qs ? (
+          <Card style={{ marginBottom:16 }}>
+            <SectionHeader icon="💬" title="Clarifying Questions" tag="Optional" tagColor="#94a3b8"/>
+            <div style={{ padding:18 }}>
+              <div style={{ background:C.surface, borderRadius:8, padding:16, marginBottom:14, fontSize:12, color:C.subtle, lineHeight:2, whiteSpace:"pre-wrap", fontFamily:C.mono, borderLeft:`3px solid ${C.gold}` }}>{qs}</div>
+              <label style={lbl}>Your Answers (leave blank to skip)</label>
+              <textarea style={{...inp, minHeight:90}} placeholder="Answer any questions to improve signoff quality..." value={clarifyAnswers} onChange={e=>setClarifyAnswers(e.target.value)}/>
+            </div>
+          </Card>
+        ) : null;
+      })()}
+
+      <div style={{ display:"flex", gap:12 }}>
+        <Btn style={{ flex:1 }} size="lg" onClick={handleProceedToReview}>
+          Next: Review & Generate →
+        </Btn>
+        <Btn variant="ghost" onClick={()=>setStep(hasDiscovery ? 1 : 0)}>← Back</Btn>
+      </div>
+    </div>
+  );
+
+  // ── Step 3 (or 2): Review before generating ───────────────────────────────
+  const renderStepReview = () => (
+    <div className="fade-in">
+      <Card style={{ marginBottom:16 }}>
+        <SectionHeader icon="📋" title="Review Before Generating" tag="Final Check" tagColor={C.gold}/>
+        <div style={{ padding:18 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:16 }}>
+            {[
+              { label:"Domains", value: AGENT_DOMAIN_ENTRIES.filter((d) => selectedDomains.includes(d.id)).map((d) => `${d.icon} ${d.label}`).join(", ")||"—" },
+              { label:"JIRA", value: jiraSubject||(jiraFiles[0]?.name)||"From uploaded file" },
+              { label:"Attachments Extracted", value: discovery ? `${discovery.attachmentResults.filter(a=>a.status==="ok").length} docs` : "—" },
+              { label:"Drive Test Cases", value: discovery?.testCasesFromSheets ? "Found" : "—" },
+              { label:"QA Comments", value: discovery?.existingQATestCases ? "Found" : "—" },
+              { label:"Gap Answers", value: gapAnswers ? "Provided" : gapFiles.length > 0 ? `${gapFiles.length} file(s)` : "—" },
+            ].map((r,i)=>(
+              <div key={i} style={{ background:C.surface, borderRadius:8, padding:"12px 14px", border:`1px solid ${C.border}` }}>
+                <div style={{ fontSize:10, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font }}>{r.label}</div>
+                <div style={{ fontSize:12, color:C.text, marginTop:5, fontFamily:C.mono, lineHeight:1.5 }}>{r.value}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ background:`${C.gold}08`, borderRadius:8, padding:"12px 16px", border:`1px solid ${C.gold}22` }}>
+            <div style={{ fontSize:10, color:C.gold, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:C.font, marginBottom:6 }}>Confirmed Objective</div>
+            <div style={{ fontSize:12, color:C.subtle, fontFamily:C.mono, lineHeight:1.7 }}>{editedObjective||"(No objective set)"}</div>
+          </div>
+        </div>
+      </Card>
+
+      {statusMsg && <div style={{ background:"#f59e0b18", border:"1px solid #f59e0b44", borderRadius:8, padding:"10px 16px", marginBottom:14, fontSize:12, color:C.gold, fontFamily:C.mono }}>{statusMsg}</div>}
+
+      <div style={{ display:"flex", gap:12 }}>
+        <Btn style={{ flex:1 }} size="lg" onClick={handleGenerate} disabled={loading}>
+          {loading ? <><Spinner/> &nbsp;Generating Signoff...</> : "🚀 Generate UAT Signoff"}
+        </Btn>
+        <Btn variant="ghost" onClick={()=>setStep(hasDiscovery ? 2 : 1)}>← Back</Btn>
+      </div>
+    </div>
+  );
+
+  // ── Compute current logical step for StepBar ──────────────────────────────
+  const getStepBarStep = () => {
+    if (!hasDiscovery) {
+      // No discovery: steps are 0=Input, 1=Clarify, 2=Review, 3=Signoff
+      if (step === 0) return 0;
+      if (step === 1) return 1; // clarify
+      if (step === 2) return 2; // review
+      if (step >= 3) return 3; // result
+    } else {
+      // With discovery: steps are 0=Input, 1=Discovery, 2=Clarify, 3=Review, 4=Signoff
+      return step;
+    }
+    return step;
+  };
+
+  // ── Result view ────────────────────────────────────────────────────────────
   const ResultView = () => (
     <div className="fade-in">
-      {/* Header bar */}
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20, flexWrap:"wrap", gap:12 }}>
         <div>
           <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -1049,6 +1457,30 @@ export default function TestSentinel() {
         {result?.signoff && <MarkdownRenderer content={result.signoff}/>}
       </Card>
 
+      {/* Discrepancy Analysis */}
+      <Card style={{ marginBottom:20, border:`1px solid #f87171${discrepancyResult?"88":"22"}` }}>
+        <SectionHeader icon="🔍" title="Discrepancy Validation" tag={discrepancyResult ? "Analyzed" : "On Demand"} tagColor={discrepancyResult ? "#f87171" : C.muted}/>
+        <div style={{ padding:18 }}>
+          {!discrepancyResult ? (
+            <>
+              <p style={{ fontSize:12, color:C.muted, margin:"0 0 14px", fontFamily:C.font, lineHeight:1.7 }}>
+                Compare UAT acceptance criteria against QA/Dev test cases from JIRA comments and Google Sheets. Raises discrepancy if any AC item is not covered.
+              </p>
+              <Btn variant="teal" onClick={handleDiscrepancyAnalysis} disabled={discrepancyLoading}>
+                {discrepancyLoading ? <><Spinner/> &nbsp;Analyzing...</> : "🔍 Run Discrepancy Analysis"}
+              </Btn>
+            </>
+          ) : (
+            <>
+              <div style={{ marginBottom:14 }}>
+                <MarkdownRenderer content={discrepancyResult}/>
+              </div>
+              <Btn variant="ghost" size="sm" onClick={()=>setDiscrepancyResult(null)}>↺ Re-run Analysis</Btn>
+            </>
+          )}
+        </div>
+      </Card>
+
       {result?.signoff && (
         <ShareAndScore
           docType="uat"
@@ -1059,18 +1491,92 @@ export default function TestSentinel() {
         />
       )}
 
-      {/* ── Feedback Section ── */}
+      {/* Local Drive cleanup */}
+      {localDriveCleanupFiles.length > 0 && cleanupStatus === null && (
+        <Card style={{ marginBottom:20, border:`1px solid #f59e0b66`, background:"#1a1200" }}>
+          <div style={{ padding:"14px 18px" }}>
+            <div style={{ fontSize:12, fontWeight:700, color:"#f59e0b", marginBottom:8 }}>🗂 Local Drive Files Used</div>
+            {localDriveCleanupFiles.map((f,i) => (
+              <div key={i} style={{ fontSize:11, color:"#fcd34d", fontFamily:"monospace", marginBottom:4 }}>📄 {f.name}</div>
+            ))}
+            {!cleanupConfirming ? (
+              <div style={{ marginTop:12 }}>
+                <p style={{ fontSize:11, color:"#d97706", margin:"0 0 10px", lineHeight:1.5 }}>
+                  UAT complete. Delete {localDriveCleanupFiles.length === 1 ? "this file" : "these files"} from Google Drive?
+                </p>
+                <div style={{ display:"flex", gap:8 }}>
+                  <Btn size="sm" variant="ghost" style={{ borderColor:"#ef444466", color:"#ef4444" }}
+                    onClick={() => setCleanupConfirming(true)}>
+                    🗑 Yes, Delete
+                  </Btn>
+                  <Btn size="sm" variant="ghost" onClick={() => setCleanupStatus("kept")}>Keep it</Btn>
+                </div>
+              </div>
+            ) : (
+              <div style={{ marginTop:12, padding:"10px 14px", background:"#300", border:"1px solid #ef444466", borderRadius:8 }}>
+                <p style={{ fontSize:12, fontWeight:700, color:"#ef4444", margin:"0 0 8px" }}>
+                  ⚠️ Confirm permanent delete from Google Drive:
+                </p>
+                {localDriveCleanupFiles.map((f,i) => (
+                  <div key={i} style={{ fontSize:11, color:"#fca5a5", fontFamily:"monospace", marginBottom:3 }}>
+                    {f.path}
+                  </div>
+                ))}
+                <p style={{ fontSize:11, color:"#fca5a5", margin:"8px 0 10px" }}>This cannot be undone.</p>
+                <div style={{ display:"flex", gap:8 }}>
+                  <Btn size="sm" style={{ background:"#ef4444", color:"#fff", border:"none" }}
+                    onClick={async () => {
+                      try {
+                        const r = await fetch(`${API_BASE}/api/local-drive-cleanup`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ files: localDriveCleanupFiles.map(f => f.path) }),
+                        });
+                        const d = await r.json().catch(() => ({}));
+                        if (d.deleted?.length > 0) setCleanupStatus("deleted");
+                        else setCleanupStatus("error");
+                      } catch (e) {
+                        setCleanupStatus("error");
+                      }
+                      setCleanupConfirming(false);
+                    }}>
+                    Confirm Delete
+                  </Btn>
+                  <Btn size="sm" variant="ghost" onClick={() => setCleanupConfirming(false)}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+      {cleanupStatus === "deleted" && (
+        <div style={{ marginBottom:16, padding:"10px 16px", background:"#052e16", border:"1px solid #16a34a55", borderRadius:9, fontSize:12, color:"#4ade80" }}>
+          ✅ Local Drive file deleted successfully.
+        </div>
+      )}
+      {cleanupStatus === "kept" && (
+        <div style={{ marginBottom:16, padding:"10px 16px", background:"#0f172a", border:"1px solid #334155", borderRadius:9, fontSize:12, color:"#94a3b8" }}>
+          📁 File kept in Google Drive.
+        </div>
+      )}
+      {cleanupStatus === "error" && (
+        <div style={{ marginBottom:16, padding:"10px 16px", background:"#300", border:"1px solid #ef444455", borderRadius:9, fontSize:12, color:"#fca5a5" }}>
+          ❌ Delete failed — remove file manually from Google Drive.
+        </div>
+      )}
+
+      {/* Feedback Section */}
       <Card style={{ marginBottom:20, border:`1px solid #a78bfa44` }}>
         <SectionHeader icon="💬" title="Improve This Signoff" tag="Feedback" tagColor="#a78bfa"/>
         <div style={{ padding:18 }}>
           <p style={{ fontSize:12, color:C.muted, margin:"0 0 14px", fontFamily:C.font, lineHeight:1.7 }}>
-            Not satisfied? Provide feedback as text or upload an annotated file. TestSentinel will regenerate an improved version.
+            Not satisfied? Provide feedback as text, upload an annotated file, or provide a Google Doc/Wiki link. TestSentinel will regenerate an improved version.
           </p>
           <ModeTab modes={INPUT_MODES} active={feedbackMode} onChange={setFeedbackMode}/>
           {feedbackMode==="type" ? (
             <>
-              <label style={lbl}>Your Feedback</label>
-              <textarea style={{...inp, minHeight:100}} placeholder="e.g. 'TC_005 result should be FAIL not PASS — see bug #204. Also add more detail in risk assessment for fraud scenarios...'" value={feedbackText} onChange={e=>setFeedbackText(e.target.value)}/>
+              <label style={lbl}>Your Feedback / Additional Context URL</label>
+              <textarea style={{...inp, minHeight:100}} placeholder={"e.g. 'TC_005 result should be FAIL — see bug #204. Add more fund-loss risk detail.'\nOr paste: https://wiki.internal/page/..."} value={feedbackText} onChange={e=>setFeedbackText(e.target.value)}/>
             </>
           ) : (
             <><input ref={fbRef} type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md,.csv" style={{display:"none"}} onChange={e=>addFiles(e.target.files,setFeedbackFiles,setFeedbackFC)}/>
@@ -1098,6 +1604,107 @@ export default function TestSentinel() {
     </div>
   );
 
+  const renderNewSession = () => {
+    const clarifyStep = hasDiscovery ? 2 : 1;
+    const reviewStep = hasDiscovery ? 3 : 2;
+    const resultStep = hasDiscovery ? 4 : 3;
+    return (
+      <div className="fade-in">
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24, flexWrap:"wrap", gap:12 }}>
+          <div>
+            <h2 style={{ margin:0, color:C.text, fontFamily:C.font, fontWeight:800, fontSize:"1.3em" }}>New UAT Session</h2>
+            <p style={{ margin:"3px 0 0", color:C.muted, fontSize:11, fontFamily:C.mono }}>
+              {lastJiraPayload ? "JIRA → Discover → Clarify → Generate" : "Fill inputs → Clarify → Generate Signoff"}
+            </p>
+          </div>
+          <ModelPicker selected={model} onChange={setModel}/>
+        </div>
+        <StepBar step={getStepBarStep()} hasDiscovery={hasDiscovery}/>
+        {step===0 && renderStep0()}
+        {step===1 && hasDiscovery && renderStep1()}
+        {step===clarifyStep && !result && renderStepClarify()}
+        {step===reviewStep && !result && renderStepReview()}
+      </div>
+    );
+  };
+
+  // ── Home View ──────────────────────────────────────────────────────────────
+  const HomeView = () => (
+    <div className="fade-in">
+      <div style={{ textAlign:"center", padding:"52px 0 40px", position:"relative" }}>
+        <div style={{ fontSize:52, marginBottom:16, filter:"drop-shadow(0 0 24px #e8b84b44)" }}>🛡️</div>
+        <h1 style={{ fontFamily:C.font, fontWeight:800, fontSize:"2.4em", margin:"0 0 8px", letterSpacing:"-0.03em", background:`linear-gradient(135deg, ${C.gold} 30%, #f8fafc)`, WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>
+          TestSentinel
+        </h1>
+        <p style={{ color:C.muted, fontSize:13, margin:"0 0 8px", fontFamily:C.mono }}>
+          UAT Signoff Agent · JIRA Auto-Discovery · Attachment Extraction · Discrepancy Analysis
+        </p>
+        <p style={{ color:"#334155", fontSize:11, margin:"0 0 32px", fontFamily:C.mono }}>
+          Enter JIRA ID → auto-fetch ticket + attachments + Google Sheets → generate UAT
+        </p>
+        <Btn size="lg" onClick={()=>{resetAll();setView("new");}}>
+          ⚡ Start New UAT Session
+        </Btn>
+        {feedbackMemory.length > 0 && (
+          <div style={{ marginTop:16, display:"inline-flex", alignItems:"center", gap:8, background:"#052E16", border:"1px solid #16A34A22", borderRadius:9, padding:"8px 14px" }}>
+            <span style={{ fontSize:11, color:"#4ADE80", fontWeight:600 }}>🧠 {feedbackMemory.length} feedback item{feedbackMemory.length>1?"s":""} remembered</span>
+            <button type="button" onClick={()=>setFeedbackMemory([])} style={{ background:"none", border:"1px solid #EF444433", borderRadius:6, padding:"2px 8px", color:"#EF4444", fontSize:10, cursor:"pointer" }}>Clear</button>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:24 }}>
+        {[
+          { icon:"📋", label:"Sessions", value: getHistory().length||"—", sub:"total performed" },
+          { icon:"📅", label:"Last 30 Days", value: getHistory().filter(h=>new Date(h.ts)>new Date(Date.now()-30*86400000)).length||"—", sub:"UATs completed" },
+          { icon:"✅", label:"Quick Action", value:"New UAT", sub:"click to start", action:()=>{resetAll();setView("new");} },
+        ].map((s,i)=>(
+          <Card key={i} className="hover-lift" style={{ padding:20, textAlign:"center", cursor:s.action?"pointer":"default", transition:"all 0.2s", marginBottom:0 }} onClick={s.action}>
+            <div style={{ fontSize:24, marginBottom:8 }}>{s.icon}</div>
+            <div style={{ fontFamily:C.font, fontWeight:800, fontSize:"1.6em", color:C.gold, marginBottom:2 }}>{s.value}</div>
+            <div style={{ fontSize:11, color:C.text, fontWeight:600, fontFamily:C.font }}>{s.label}</div>
+            <div style={{ fontSize:10, color:C.muted, marginTop:2, fontFamily:C.mono }}>{s.sub}</div>
+          </Card>
+        ))}
+      </div>
+
+      {/* New capabilities highlight */}
+      <Card style={{ marginBottom:18 }}>
+        <SectionHeader icon="⚡" title="What's New — Enhanced UAT Flow" tagColor={C.gold}/>
+        <div style={{ padding:18, display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:12 }}>
+          {[
+            { icon:"🔵", title:"JIRA Auto-Discovery", desc:"Fetch ticket + all fields (AC, fix version, labels, reporter, assignee)" },
+            { icon:"📎", title:"Attachment Extraction", desc:"PDF/DOCX BRDs & PRDs auto-extracted from JIRA attachments" },
+            { icon:"📊", title:"Google Drive Fetch", desc:"Test case sheets auto-read from Drive links in ticket body" },
+            { icon:"❓", title:"Gap Analysis", desc:"Auto-detect missing data and surface targeted gap questions" },
+            { icon:"🔍", title:"Discrepancy Analysis", desc:"Compare UAT scenarios vs QA test cases — raise coverage gaps" },
+            { icon:"🔄", title:"Feedback Loop", desc:"Regenerate with feedback; memory persists improvements across sessions" },
+          ].map((f,i)=>(
+            <div key={i} style={{ background:C.surface, borderRadius:9, padding:14, border:`1px solid ${C.border}` }}>
+              <div style={{ fontSize:18, marginBottom:6 }}>{f.icon}</div>
+              <div style={{ fontWeight:700, color:C.text, fontSize:12, fontFamily:C.font }}>{f.title}</div>
+              <div style={{ fontSize:11, color:C.muted, marginTop:4, fontFamily:C.mono, lineHeight:1.5 }}>{f.desc}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom:18 }}>
+        <SectionHeader icon="🎯" title="Supported UAT Domains" />
+        <div style={{ padding:18, display:"flex", flexWrap:"wrap", gap:8 }}>
+          {AGENT_DOMAIN_ENTRIES.map((d) => (
+            <div key={d.id} style={{ display:"flex", alignItems:"center", gap:6, background:`${d.color}12`, border:`1px solid ${d.color}22`, borderRadius:7, padding:"6px 12px" }}>
+              <span>{d.icon}</span>
+              <span style={{ fontSize:11, color:d.color, fontWeight:700, fontFamily:C.font }}>{d.label}</span>
+              <span style={{ fontSize:10, color:C.muted, fontFamily:C.mono }}>{d.full}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+
+  // ── History view ────────────────────────────────────────────────────────────
   const HistoryView = () => {
     const hist = getHistory();
     const now = Date.now();
@@ -1115,7 +1722,6 @@ export default function TestSentinel() {
           </div>
           <Btn onClick={()=>{resetAll();setView("new");}}>+ New Session</Btn>
         </div>
-
         {hist.length===0 ? (
           <Card style={{ textAlign:"center", padding:56 }}>
             <div style={{ fontSize:36, marginBottom:12 }}>📭</div>
@@ -1141,7 +1747,8 @@ export default function TestSentinel() {
                       } else {
                         setSelectedDomains(domainIdsFromLabels(h.domains));
                       }
-                      setStep(3);
+                      const resultStep = 3; // always show at result step in history
+                      setStep(resultStep);
                       setResult({ signoff: h.signoff, id: h.id, domains: h.domains || [] });
                       setView("result");
                     }}
@@ -1178,13 +1785,12 @@ export default function TestSentinel() {
   // ── Layout ─────────────────────────────────────────────────────────────────
   return (
     <div style={{ background:C.bg, minHeight:"100vh", color:C.text }}>
-      {/* Nav */}
       <nav style={{ background:C.surface, borderBottom:`1px solid ${C.border}`, padding:"13px 28px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, position:"sticky", top:0, zIndex:100, backdropFilter:"blur(10px)" }}>
         <div style={{ display:"flex", alignItems:"center", gap:12, cursor:"pointer" }} onClick={()=>setView("home")}>
           <div style={{ width:34, height:34, background:`linear-gradient(135deg, ${C.gold}, #f0cc6a)`, borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", fontSize:17, flexShrink:0, boxShadow:`0 0 14px ${C.gold}44` }}>🛡️</div>
           <div>
             <div style={{ fontWeight:800, fontSize:15, color:C.text, letterSpacing:"-0.03em", fontFamily:C.font }}>TestSentinel</div>
-            <div style={{ fontSize:9, color:C.muted, letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:C.mono }}>UAT Signoff Agent</div>
+            <div style={{ fontSize:9, color:C.muted, letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:C.mono }}>UAT Signoff · Auto-Discovery</div>
           </div>
         </div>
         <div style={{ display:"flex", gap:4 }}>
@@ -1213,7 +1819,7 @@ export default function TestSentinel() {
       </main>
 
       <footer style={{ borderTop:`1px solid ${C.border}`, padding:"14px 28px", textAlign:"center", fontSize:10, color:"#334155", fontFamily:C.mono }}>
-        TestSentinel · Domain-Scoped UAT · RAG-enabled · Multi-model · <span style={{color:C.gold}}>Powered by Anthropic</span>
+        TestSentinel · JIRA Auto-Discovery · Attachment Extraction · Discrepancy Analysis · <span style={{color:C.gold}}>Powered by Anthropic</span>
       </footer>
     </div>
   );

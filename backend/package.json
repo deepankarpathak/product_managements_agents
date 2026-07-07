@@ -12,6 +12,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
     "@aws-sdk/client-bedrock-runtime": "^3.1023.0",
     "cors": "^2.8.6",
     "docx": "^9.6.1",

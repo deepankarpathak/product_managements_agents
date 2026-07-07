@@ -83,6 +83,7 @@ export function getLlmProviderForRequest() {
   if (v === "foundry") return "foundry";
   if (v === "openai") return "openai";
   if (v === "aws") return "aws";
+  if (v === "anthropic") return "anthropic";
   if (v === "off") return "off";
   return "auto";
 }
@@ -138,6 +139,7 @@ export default function ConnectorsStatus() {
     llmBedrockConfigured: false,
     llmFoundryConfigured: false,
     llmOpenAiConfigured: false,
+    llmAnthropicConfigured: false,
     llmProviders: [],
   });
   const [open, setOpen] = useState(false);
@@ -388,7 +390,8 @@ export default function ConnectorsStatus() {
               <p style={{ fontSize: 10, color: "#64748b", margin: "0 0 10px", lineHeight: 1.5 }}>
                 Startup and on-demand checks: <strong style={{ color: "#94a3b8" }}>Bedrock</strong>,{" "}
                 <strong style={{ color: "#94a3b8" }}>Foundry</strong>, <strong style={{ color: "#94a3b8" }}>OpenAI</strong> (Share &amp; Score),{" "}
-                <strong style={{ color: "#94a3b8" }}>Gemini</strong> (optional key — not used by agents unless you add routing).
+                <strong style={{ color: "#94a3b8" }}>Gemini</strong> (optional),{" "}
+                <strong style={{ color: "#c4b5fd" }}>Anthropic</strong> (set <code style={{ color: "#94a3b8" }}>ANTHROPIC_API_KEY</code> in .env or shell).
               </p>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {(Array.isArray(status.llmProviders) ? status.llmProviders : []).map((p) => {
@@ -479,7 +482,7 @@ export default function ConnectorsStatus() {
             <div style={{ marginBottom: 16, padding: 14, background: "#1e293b", borderRadius: 12, border: "1px solid #334155" }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>LLM routing (all agents)</div>
               <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 10px", lineHeight: 1.5 }}>
-                <strong style={{ color: "#93c5fd" }}>Auto</strong> tries <strong>AWS Bedrock</strong>, then <strong>OpenAI</strong>, then <strong>Foundry</strong> (skips any provider you disabled). Each agent sends an <code style={{ color: "#94a3b8" }}>agent</code> label for usage. Saved in this browser.
+                <strong style={{ color: "#93c5fd" }}>Auto</strong> tries <strong>AWS Bedrock</strong>, then <strong>Foundry</strong>, then <strong>OpenAI</strong>, then <strong>Anthropic</strong> (skips any provider you disabled). Each agent sends an <code style={{ color: "#94a3b8" }}>agent</code> label for usage. Saved in this browser.
               </p>
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <button
@@ -501,7 +504,7 @@ export default function ConnectorsStatus() {
                     fontFamily: "inherit",
                   }}
                 >
-                  Auto (Bedrock → OpenAI → Foundry)
+                  Auto (Bedrock → Foundry → OpenAI → Anthropic)
                 </button>
                 <button
                   type="button"
@@ -569,6 +572,27 @@ export default function ConnectorsStatus() {
                 <button
                   type="button"
                   onClick={() => {
+                    const next = { ...loadPublishDefaults(), llmProvider: "anthropic" };
+                    savePublishDefaults(next);
+                    setPublishDefaults(next);
+                  }}
+                  style={{
+                    padding: "8px 14px",
+                    borderRadius: 8,
+                    border: String(publishDefaults.llmProvider || "auto") === "anthropic" ? "#a78bfa 1px solid" : "#334155 1px solid",
+                    background: String(publishDefaults.llmProvider || "auto") === "anthropic" ? "#a78bfa22" : "#0f172a",
+                    color: String(publishDefaults.llmProvider || "auto") === "anthropic" ? "#c4b5fd" : "#94a3b8",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  Anthropic only
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     const next = { ...loadPublishDefaults(), llmProvider: "off" };
                     savePublishDefaults(next);
                     setPublishDefaults(next);
@@ -593,6 +617,8 @@ export default function ConnectorsStatus() {
                   OpenAI: {status.llmOpenAiConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
                   {" · "}
                   Foundry: {status.llmFoundryConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
+                  {" · "}
+                  Anthropic: {status.llmAnthropicConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
                 </span>
               </div>
               <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>

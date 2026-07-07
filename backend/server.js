@@ -5,6 +5,8 @@ import dotenv from "dotenv";
 import https from "https";
 import fs from "fs";
 import path from "path";
+import os from "os";
+import * as XLSX from "xlsx";
 import { fileURLToPath } from "url";
 import multer from "multer";
 import mammoth from "mammoth";
@@ -22,6 +24,7 @@ import {
   resolveBedrockModelId,
 } from "./bedrockClient.js";
 import { recordAgentDayUsage, getDailySummary } from "./llmUsageStore.js";
+import Anthropic from "@anthropic-ai/sdk";
 import {
   markdownToEmailHtml,
   markdownToJiraAdf,
@@ -88,11 +91,46 @@ const OPENAI_ROUTING_MODEL =
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
 const GEMINI_MODEL = String(process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
 
+// ── Google Sheets OAuth (plain HTTP, no googleapis package) ──────────────────
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "http://localhost:5000/api/google-auth/callback";
+const GOOGLE_TOKEN_FILE = path.join(__dirname, ".google_token.json");
+
+function loadGoogleToken() {
+  try { return JSON.parse(fs.readFileSync(GOOGLE_TOKEN_FILE, "utf8")); } catch { return null; }
+}
+function saveGoogleToken(t) {
+  try { fs.writeFileSync(GOOGLE_TOKEN_FILE, JSON.stringify(t, null, 2)); } catch {}
+}
+
+async function getGoogleAccessToken() {
+  const token = loadGoogleToken();
+  if (!token?.refresh_token) return null;
+  const now = Date.now() / 1000;
+  if (token.access_token && token.expiry_date && token.expiry_date > now + 60) return token.access_token;
+  // Refresh
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: token.refresh_token, grant_type: "refresh_token",
+    }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.access_token) return null;
+  const updated = { ...token, access_token: d.access_token, expiry_date: now + (d.expires_in || 3600) };
+  saveGoogleToken(updated);
+  return d.access_token;
+}
+
 /** Cached LLM probes for Connectors (startup + optional refresh). */
 const llmProviderHealth = {
   foundry: { configured: false, ok: null, error: null, at: null },
   openai: { configured: false, ok: null, error: null, at: null },
   gemini: { configured: false, ok: null, error: null, at: null },
+  anthropic: { configured: false, ok: null, error: null, at: null },
 };
 
 /**
@@ -352,11 +390,53 @@ function buildLlmProvidersPayload() {
     at: llmProviderHealth.gemini.at,
     usage24h: usage.gemini || null,
   };
-  return [bedrock, foundry, openai, gemini];
+  const anthropicHealth = {
+    id: "anthropic",
+    label: "Anthropic",
+    configured: llmProviderHealth.anthropic.configured,
+    ok: llmProviderHealth.anthropic.ok,
+    error: llmProviderHealth.anthropic.error,
+    at: llmProviderHealth.anthropic.at,
+    usage24h: usage.anthropic || null,
+  };
+  return [bedrock, foundry, openai, gemini, anthropicHealth];
+}
+
+async function probeAnthropicLlm() {
+  const key = process.env.ANTHROPIC_API_KEY || "";
+  llmProviderHealth.anthropic.configured = !!key;
+  if (!key) {
+    llmProviderHealth.anthropic.ok = false;
+    llmProviderHealth.anthropic.error = "ANTHROPIC_API_KEY not set — add to .env or export in shell before starting backend";
+    llmProviderHealth.anthropic.at = Date.now();
+    return;
+  }
+  try {
+    const anthropicProbe = new Anthropic({ apiKey: key });
+    const r = await anthropicProbe.messages.create({
+      model: process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "Reply with exactly: OK" }],
+    });
+    const text = r.content?.[0]?.text?.trim() || "";
+    if (!text) {
+      llmProviderHealth.anthropic.ok = false;
+      llmProviderHealth.anthropic.error = "Empty response from Anthropic API";
+      llmProviderHealth.anthropic.at = Date.now();
+      return;
+    }
+    llmProviderHealth.anthropic.ok = true;
+    llmProviderHealth.anthropic.error = null;
+    llmProviderHealth.anthropic.at = Date.now();
+  } catch (e) {
+    llmProviderHealth.anthropic.ok = false;
+    llmProviderHealth.anthropic.error = e?.message || String(e);
+    llmProviderHealth.anthropic.at = Date.now();
+  }
 }
 
 async function runNonBedrockLlmProbes() {
-  await Promise.all([probeFoundryLlm(), probeOpenAiLlm(), probeGeminiLlm()]);
+  await Promise.all([probeFoundryLlm(), probeOpenAiLlm(), probeGeminiLlm(), probeAnthropicLlm()]);
 }
 
 function scoreFoundryBaseUrl() {
@@ -605,6 +685,18 @@ function extractJiraText(doc) {
   }
 }
 
+/** Recursively extract all URLs from ADF doc — inlineCard nodes + link marks. */
+function extractADFUrls(node, out = []) {
+  if (!node || typeof node !== "object") return out;
+  if (Array.isArray(node)) { node.forEach(n => extractADFUrls(n, out)); return out; }
+  if (node.type === "inlineCard" && node.attrs?.url) out.push(node.attrs.url);
+  if (node.type === "text" && Array.isArray(node.marks)) {
+    node.marks.forEach(m => { if (m.type === "link" && m.attrs?.href) out.push(m.attrs.href); });
+  }
+  if (Array.isArray(node.content)) extractADFUrls(node.content, out);
+  return out;
+}
+
 /** JIRA user picker / multi-user: display names joined. */
 function jiraUserFieldDisplay(val) {
   if (val == null) return "";
@@ -722,7 +814,9 @@ app.post("/api/generate", async (req, res) => {
           ? "foundry"
           : requested === "openai"
             ? "openai"
-            : "aws";
+            : requested === "anthropic"
+              ? "anthropic"
+              : "aws";
     const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
     const openaiModelFromConnectors =
       typeof req.body?.openaiModel === "string" && req.body.openaiModel.trim() ? req.body.openaiModel.trim() : null;
@@ -960,14 +1054,38 @@ app.post("/api/generate", async (req, res) => {
       throw err;
     };
 
+    const ANTHROPIC_API_KEY_GEN = process.env.ANTHROPIC_API_KEY || "";
+    const tryAnthropic = async () => {
+      if (!ANTHROPIC_API_KEY_GEN) {
+        const err = new Error("Set ANTHROPIC_API_KEY in .env for Anthropic direct routing.");
+        err.code = "ANTHROPIC_NOT_CONFIGURED";
+        throw err;
+      }
+      const anthropicModel = modelFromBody || process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+      const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY_GEN });
+      const started = Date.now();
+      const r = await anthropic.messages.create({
+        model: anthropicModel,
+        max_tokens: incomingMaxTokens,
+        ...(incomingSystem ? { system: incomingSystem } : {}),
+        messages,
+      });
+      const toks = { promptTokens: r.usage?.input_tokens || 0, completionTokens: r.usage?.output_tokens || 0 };
+      recordLlmUsageEvent({ provider: "anthropic", ok: true, ms: Date.now() - started, agent, model: anthropicModel, ...toks });
+      try { recordAgentDayUsage({ agent, provider: "anthropic", model: anthropicModel, ...toks }); } catch (e) { void e; }
+      return { provider: "anthropic", data: r, model: anthropicModel, ...toks };
+    };
+
     const order =
       llmMode === "auto"
-        ? ["aws", "foundry", "openai"]
+        ? ["aws", "foundry", "openai", "anthropic"]
         : llmMode === "foundry"
           ? ["foundry"]
           : llmMode === "openai"
             ? ["openai"]
-            : ["aws"];
+            : llmMode === "anthropic"
+              ? ["anthropic"]
+              : ["aws"];
     const tried = [];
     let lastErr = null;
     for (const p of order) {
@@ -984,7 +1102,7 @@ app.post("/api/generate", async (req, res) => {
         continue;
       }
       try {
-        const result = p === "aws" ? await tryAws() : p === "openai" ? await tryOpenAi() : await tryFoundry();
+        const result = p === "aws" ? await tryAws() : p === "openai" ? await tryOpenAi() : p === "anthropic" ? await tryAnthropic() : await tryFoundry();
         const llmModel = result.model || (result.provider === "aws" ? modelFromBody || bedrockModelTier || "default" : "default");
         console.log(`[${new Date().toISOString()}] [api/generate] ✓ provider=${result.provider} model=${llmModel} ms=${Date.now() - startedAt}`);
         return res.json({ success: true, data: result.data, llmProvider: result.provider, llmTried: tried, llmModel });
@@ -1011,15 +1129,46 @@ app.post("/api/claude", async (req, res) => {
     const incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
     const incomingMaxTokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 4000;
     const messages = incomingMessages?.length ? incomingMessages : [{ role: "user", content: req.body?.prompt || "" }];
-    const llmProvider = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase() === "foundry" ? "foundry" : "aws";
+    const requestedProvider = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase();
+    const llmProvider = requestedProvider === "foundry" ? "foundry" : requestedProvider === "anthropic" ? "anthropic" : "aws";
     const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
     const bedrockModelTier =
       typeof req.body?.bedrockModelTier === "string" && req.body.bedrockModelTier.trim()
         ? req.body.bedrockModelTier.trim()
         : null;
 
+    if (llmProvider === "anthropic") {
+      const ANTHROPIC_API_KEY_CLAUDE = process.env.ANTHROPIC_API_KEY || "";
+      if (!ANTHROPIC_API_KEY_CLAUDE) {
+        return res.status(503).json({ error: { message: "ANTHROPIC_API_KEY not set." } });
+      }
+      const anthropicClaude = new Anthropic({ apiKey: ANTHROPIC_API_KEY_CLAUDE });
+      const anthropicModel = modelFromBody || process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+      console.log(`[${new Date().toISOString()}] [api/claude] provider=anthropic model=${anthropicModel}`);
+      const r = await anthropicClaude.messages.create({
+        model: anthropicModel,
+        max_tokens: incomingMaxTokens,
+        ...(incomingSystem ? { system: incomingSystem } : {}),
+        messages,
+      });
+      return res.json(r);
+    }
+
     if (llmProvider === "aws") {
       if (!isBedrockConfigured()) {
+        const ANTHROPIC_API_KEY_CLAUDE = process.env.ANTHROPIC_API_KEY || "";
+        if (ANTHROPIC_API_KEY_CLAUDE) {
+          const anthropicClaude = new Anthropic({ apiKey: ANTHROPIC_API_KEY_CLAUDE });
+          const anthropicModel = modelFromBody || process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+          console.log(`[${new Date().toISOString()}] [api/claude] provider=anthropic(bedrock-fallback) model=${anthropicModel}`);
+          const r = await anthropicClaude.messages.create({
+            model: anthropicModel,
+            max_tokens: incomingMaxTokens,
+            ...(incomingSystem ? { system: incomingSystem } : {}),
+            messages,
+          });
+          return res.json(r);
+        }
         return res.status(503).json({
           error: { message: "AWS Bedrock not configured — see .env.example (HTTP gateway or native SDK vars)." },
         });
@@ -1036,6 +1185,19 @@ app.post("/api/claude", async (req, res) => {
     }
 
     if (!LLM_API_KEY) {
+      const ANTHROPIC_API_KEY_CLAUDE = process.env.ANTHROPIC_API_KEY || "";
+      if (ANTHROPIC_API_KEY_CLAUDE) {
+        const anthropicClaude = new Anthropic({ apiKey: ANTHROPIC_API_KEY_CLAUDE });
+        const anthropicModel = modelFromBody || process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+        console.log(`[${new Date().toISOString()}] [api/claude] provider=anthropic(foundry-fallback) model=${anthropicModel}`);
+        const r = await anthropicClaude.messages.create({
+          model: anthropicModel,
+          max_tokens: incomingMaxTokens,
+          ...(incomingSystem ? { system: incomingSystem } : {}),
+          messages,
+        });
+        return res.json(r);
+      }
       return res.status(500).json({ error: { message: "Set LLM_KEY_API or LLM_API_KEY in .env for Foundry" } });
     }
     const requestBody = {
@@ -1068,7 +1230,7 @@ app.post("/api/claude", async (req, res) => {
   }
 });
 
-const ALPHA_ROOT = "/Users/deepankarpathak/Library/CloudStorage/GoogleDrive-deepankar.pathak@finmate.tech/.shortcut-targets-by-id/1QdRXLOJP1KCTJVfFeL4tuFyIC3GY0pbh/UPI Alpha";
+const ALPHA_ROOT = process.env.ALPHA_ROOT;
 
 app.post("/api/alpha/chat", async (req, res) => {
   const alphaStarted = Date.now();
@@ -1085,10 +1247,10 @@ app.post("/api/alpha/chat", async (req, res) => {
     };
 
     const [soul, claudeMd, products, index] = await Promise.all([
-      readSafe(`${ALPHA_ROOT}/SOUL.md`),
-      readSafe(`${ALPHA_ROOT}/CLAUDE.md`, 2000),
-      readSafe(`${ALPHA_ROOT}/PRODUCTS.md`),
-      readSafe(`${ALPHA_ROOT}/INDEX.md`, 3000),
+      readSafe(`${ALPHA_ROOT}/SOUL.md`, 1500),
+      readSafe(`${ALPHA_ROOT}/CLAUDE.md`, 1500),
+      readSafe(`${ALPHA_ROOT}/PRODUCTS.md`, 1500),
+      readSafe(`${ALPHA_ROOT}/INDEX.md`, 2000),
     ]);
 
     const wikiDir = `${ALPHA_ROOT}/wiki`;
@@ -1096,28 +1258,35 @@ app.post("/api/alpha/chat", async (req, res) => {
     let wikiContext = "";
     try {
       const tokens = message.toLowerCase().split(/[^a-z0-9_]+/).filter(t => t.length >= 3);
-      async function walkMd(dir) {
+      // Step 1: collect filenames only (no I/O per file)
+      async function walkMdNames(dir) {
         const entries = await fs.promises.readdir(dir, { withFileTypes: true });
         const results = [];
         for (const e of entries) {
           const full = path.join(dir, e.name);
-          if (e.isDirectory()) results.push(...(await walkMd(full)));
+          if (e.isDirectory()) results.push(...(await walkMdNames(full)));
           else if (/\.md$/i.test(e.name)) results.push(full);
         }
         return results;
       }
-      const mdFiles = await walkMd(wikiDir);
-      const scored = [];
-      for (const f of mdFiles) {
-        const txt = await readSafe(f, 6000);
+      const allFiles = await walkMdNames(wikiDir);
+      // Step 2: score by filename only (instant) → top 15 candidates
+      const byName = allFiles.map(f => {
+        const base = path.basename(f).toLowerCase();
+        let s = 0;
+        for (const t of tokens) if (base.includes(t)) s += t.length > 6 ? 5 : 2;
+        return { f, s };
+      }).sort((a, b) => b.s - a.s).slice(0, 15).map(x => x.f);
+      // Step 3: read top 15 in parallel, score by content
+      const reads = await Promise.all(byName.map(async f => {
+        const txt = await readSafe(f, 5000);
         const lower = txt.toLowerCase();
         let score = 0;
         for (const t of tokens) if (lower.includes(t)) score += t.length > 6 ? 3 : 1;
-        if (score > 0) scored.push({ f, txt, score });
-      }
-      scored.sort((a, b) => b.score - a.score);
-      const top4 = scored.slice(0, 4);
-      wikiContext = top4.map(x => `### ${path.relative(wikiDir, x.f)}\n${x.txt.slice(0, 3000)}`).join("\n\n---\n\n");
+        return { f, txt, score };
+      }));
+      const top4 = reads.filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 4);
+      wikiContext = top4.map(x => `### ${path.relative(wikiDir, x.f)}\n${x.txt.slice(0, 2500)}`).join("\n\n---\n\n");
       filesUsed.push(...top4.map(x => path.relative(ALPHA_ROOT, x.f)));
     } catch (e) {
       console.warn("[api/alpha/chat] wiki search error:", e.message);
@@ -1138,10 +1307,21 @@ app.post("/api/alpha/chat", async (req, res) => {
     ];
 
     const requested = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase();
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
     let reply = "";
     let llmProvider = requested;
 
-    if (requested !== "foundry" && requested !== "openai" && isBedrockConfigured()) {
+    if (requested === "anthropic" && ANTHROPIC_API_KEY) {
+      const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+      const r = await anthropic.messages.create({
+        model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
+        max_tokens: 4000,
+        system: systemPrompt,
+        messages,
+      });
+      reply = r.content?.[0]?.text || "";
+      llmProvider = "anthropic";
+    } else if (requested !== "foundry" && requested !== "openai" && requested !== "anthropic" && isBedrockConfigured() && bedrockHealth.ok) {
       const data = await converseBedrock({ messages, system: systemPrompt, maxTokens: 4000 });
       reply = data?.content?.[0]?.text || JSON.stringify(data);
       llmProvider = "aws";
@@ -1163,6 +1343,16 @@ app.post("/api/alpha/chat", async (req, res) => {
       const j = await r.json();
       reply = j?.content?.[0]?.text || JSON.stringify(j);
       llmProvider = "foundry";
+    } else if (ANTHROPIC_API_KEY) {
+      const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+      const r = await anthropic.messages.create({
+        model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
+        max_tokens: 4000,
+        system: systemPrompt,
+        messages,
+      });
+      reply = r.content?.[0]?.text || "";
+      llmProvider = "anthropic";
     } else {
       return res.status(503).json({ success: false, error: "No LLM provider configured" });
     }
@@ -1317,6 +1507,7 @@ app.get("/api/connectors/status", (req, res) => {
     llmBedrockConfigured: isBedrockConfigured(),
     llmFoundryConfigured: !!(LLM_API_KEY && LLM_URL),
     llmOpenAiConfigured: !!OPENAI_API_KEY,
+    llmAnthropicConfigured: llmProviderHealth.anthropic.configured,
     llmProviders: buildLlmProvidersPayload(),
     jira: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
     jiraSites: sites,
@@ -1389,7 +1580,20 @@ function formatJiraIssueApiResponse(d, jiraBaseUrl) {
   const statusName = f.status?.name || "";
   const inUat = /^in\s*uat$/i.test(String(statusName).trim());
   const haystackForSheets = [allCommentsText, extractJiraText(f.description)].filter(Boolean).join("\n");
-  const qaTestCaseSheetUrls = inUat ? extractGoogleSheetUrlsFromText(haystackForSheets) : [];
+  // Also extract URLs embedded as ADF inlineCard / link marks (not in plain text)
+  const adfUrlsFromComments = commentList.flatMap(c => extractADFUrls(c.body));
+  const adfUrlsFromDesc = extractADFUrls(f.description);
+  const allAdfUrls = [...new Set([...adfUrlsFromComments, ...adfUrlsFromDesc])];
+  const qaTestCaseSheetUrls = [
+    ...extractGoogleSheetUrlsFromText(haystackForSheets),
+    ...allAdfUrls.filter(u => /spreadsheets\/d\//i.test(u)),
+  ].filter((u, i, a) => a.indexOf(u) === i);
+  const GOOGLE_DRIVE_ALL_RE = /https?:\/\/(?:docs|drive)\.google\.com\/[^\s"'),.;<>]+/gi;
+  const driveLinksRaw = [
+    ...(haystackForSheets.match(GOOGLE_DRIVE_ALL_RE) || []).map(u => u.replace(/[),.;]+$/, "")),
+    ...allAdfUrls.filter(u => /google\.com/i.test(u)),
+  ];
+  const driveLinks = [...new Set(driveLinksRaw)];
 
   const assigneeName = f.assignee?.displayName || "Unassigned";
   const devFromCf = JIRA_DEV_ASSIGNEE_FIELD_ID ? jiraUserFieldDisplay(f[JIRA_DEV_ASSIGNEE_FIELD_ID]) : "";
@@ -1413,9 +1617,12 @@ function formatJiraIssueApiResponse(d, jiraBaseUrl) {
     labels: (f.labels || []).join(", "),
     components: (f.components || []).map((c) => c.name).join(", "),
     fixVersions: (f.fixVersions || []).map((v) => v.name).join(", "),
-    acceptanceCriteria: f.customfield_10023 || f.customfield_10034 || "",
+    acceptanceCriteria: extractJiraText(f.customfield_10023 || f.customfield_10034 || ""),
     comments,
     qaTestCaseSheetUrls,
+    driveLinks,
+    requirement: f.customfield_10023 ? extractJiraText(f.customfield_10023) : "",
+    fundlossRisk: f.customfield_10100 ? String(f.customfield_10100) : (f.customfield_10050 ? String(f.customfield_10050) : ""),
     attachments: (f.attachment || []).map((a) => a.filename).join(", "),
     attachmentItems: (f.attachment || [])
       .map((a) => ({
@@ -1486,6 +1693,239 @@ app.get("/api/jira-issue/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Proxy-download a JIRA attachment and extract text (PDF / DOCX / plaintext)
+app.get("/api/jira-attachment-text", async (req, res) => {
+  const { url: rawUrl, filename } = req.query;
+  if (!rawUrl) return res.status(400).json({ error: "url required" });
+  if (!JIRA_EMAIL || !JIRA_TOKEN) return res.status(400).json({ error: "JIRA credentials not configured" });
+  try {
+    const r = await fetch(rawUrl, { headers: { Authorization: jiraAuthHeader(), Accept: "*/*" } });
+    if (!r.ok) return res.status(r.status).json({ error: `Attachment fetch failed: ${r.status}` });
+    const buf = Buffer.from(await r.arrayBuffer());
+    const fname = String(filename || rawUrl).toLowerCase();
+    let text = "";
+    if (fname.includes(".pdf")) {
+      text = await extractTextFromPDFBuffer(buf);
+    } else if (fname.includes(".docx")) {
+      const result = await mammoth.extractRawText({ buffer: buf });
+      text = result.value || "";
+    } else if (fname.includes(".xlsx") || fname.includes(".xls")) {
+      // xlsx → plain text via existing import
+      const XLSX_mod = await import("xlsx");
+      const wb = XLSX_mod.default.read(buf, { type: "buffer" });
+      text = wb.SheetNames.map((n) => {
+        const ws = wb.Sheets[n];
+        return `Sheet: ${n}\n` + XLSX_mod.default.utils.sheet_to_csv(ws);
+      }).join("\n\n");
+    } else {
+      text = buf.toString("utf-8");
+    }
+    return res.json({ text: text.slice(0, 30000), filename, chars: text.length });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Extraction failed" });
+  }
+});
+
+// ── Google OAuth endpoints ────────────────────────────────────────────────────
+app.get("/api/google-auth/url", (req, res) => {
+  if (!GOOGLE_CLIENT_ID) return res.status(400).json({ error: "GOOGLE_CLIENT_ID not configured" });
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    response_type: "code",
+    scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
+    access_type: "offline",
+    prompt: "consent",
+  });
+  res.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
+});
+
+app.get("/api/google-auth/callback", async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send("Missing code");
+  try {
+    const r = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: GOOGLE_REDIRECT_URI, grant_type: "authorization_code",
+      }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.refresh_token) throw new Error(d.error_description || "Token exchange failed — no refresh_token returned");
+    saveGoogleToken({ ...d, expiry_date: Date.now() / 1000 + (d.expires_in || 3600) });
+    res.send("<h2>✅ Google Sheets access authorised!</h2><p>You can close this tab. The UAT agent can now read private Google Sheets.</p>");
+  } catch (e) {
+    res.status(500).send(`<h2>❌ Auth failed: ${e.message}</h2>`);
+  }
+});
+
+app.get("/api/google-auth/status", (req, res) => {
+  const t = loadGoogleToken();
+  res.json({ authorised: !!(t?.refresh_token), hasToken: !!t });
+});
+
+// Fetch Google Drive / Sheets content — uses OAuth for private sheets, falls back to public CSV export
+app.get("/api/gdrive-fetch", async (req, res) => {
+  const { url: rawUrl, sheetTabName } = req.query;
+  if (!rawUrl) return res.status(400).json({ error: "url required" });
+  try {
+    const sheetsMatch = rawUrl.match(/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    const docsMatch = rawUrl.match(/document\/d\/([a-zA-Z0-9-_]+)/);
+
+    if (sheetsMatch) {
+      const sheetId = sheetsMatch[1];
+
+      // ── Local filesystem scan (Google Drive for Desktop) ──────────────────
+      const gDriveLocal = process.env.GDRIVE_LOCAL_PATH ||
+        path.join(os.homedir(), "Google Drive", "My Drive");
+      if (sheetTabName && fs.existsSync(gDriveLocal)) {
+        const candidates = [`${sheetTabName}.csv`, `${sheetTabName}.xlsx`, `${sheetTabName}.xls`];
+        for (const cand of candidates) {
+          const found = findFileInDir(gDriveLocal, cand);
+          if (found) {
+            const fileData = fs.readFileSync(found);
+            let text;
+            if (cand.endsWith(".csv")) {
+              text = fileData.toString("utf8");
+            } else {
+              const wb = XLSX.read(fileData);
+              const ws = wb.Sheets[wb.SheetNames[0]];
+              text = XLSX.utils.sheet_to_csv(ws);
+            }
+            return res.json({
+              text: text.slice(0, 50000), type: "sheet", tabName: sheetTabName,
+              source: "local", filePath: found, chars: text.length,
+            });
+          }
+        }
+        // Not found locally — return instructions
+        const targetPath = path.join(gDriveLocal, `${sheetTabName}.csv`);
+        return res.json({
+          text: null, type: "sheet", requiresAuth: false, localNotFound: true,
+          localPath: gDriveLocal,
+          message: `Test case sheet for "${sheetTabName}" not found locally. Export tab "${sheetTabName}" from Google Sheets as CSV and save to Google Drive as "${sheetTabName}.csv".`,
+          hint: `Target path: ${targetPath}`,
+        });
+      }
+
+      const accessToken = await getGoogleAccessToken();
+
+      // ── Authenticated path: Sheets API v4 ──────────────────────────────────
+      if (accessToken) {
+        const authHeader = { Authorization: `Bearer ${accessToken}` };
+
+        // Get sheet metadata to find tab by name or gid
+        const metaR = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`, { headers: authHeader });
+        if (!metaR.ok) {
+          const errBody = await metaR.json().catch(() => ({}));
+          throw new Error(errBody.error?.message || `Sheets API metadata failed: ${metaR.status}`);
+        }
+        const meta = await metaR.json();
+        const sheets = meta.sheets || [];
+
+        // Find target tab: by sheetTabName param, or gid from URL, or first sheet
+        let targetSheet = null;
+        if (sheetTabName) {
+          targetSheet = sheets.find(s => s.properties?.title?.toLowerCase() === String(sheetTabName).toLowerCase());
+        }
+        if (!targetSheet) {
+          const gidMatch = rawUrl.match(/[#?&]gid=(\d+)/);
+          if (gidMatch) targetSheet = sheets.find(s => String(s.properties?.sheetId) === gidMatch[1]);
+        }
+        if (!targetSheet) targetSheet = sheets[0];
+
+        if (!targetSheet) return res.json({ text: null, type: "sheet", error: "No matching tab found", sheets: sheets.map(s => s.properties?.title) });
+
+        const tabName = targetSheet.properties.title;
+        const valuesR = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(tabName)}`,
+          { headers: authHeader }
+        );
+        if (!valuesR.ok) {
+          const errBody = await valuesR.json().catch(() => ({}));
+          throw new Error(errBody.error?.message || `Sheets API values failed: ${valuesR.status}`);
+        }
+        const data = await valuesR.json();
+        const rows = data.values || [];
+        // Convert rows array to CSV-like text
+        const text = rows.map(r => r.map(c => String(c).replace(/,/g, ";")).join(",")).join("\n");
+        return res.json({ text: text.slice(0, 50000), type: "sheet", tabName, rowCount: rows.length, chars: text.length, authenticated: true });
+      }
+
+      // ── Public CSV export fallback ────────────────────────────────────────
+      const gidMatch = rawUrl.match(/[#?&]gid=(\d+)/);
+      const gidPart = gidMatch ? `&gid=${gidMatch[1]}` : "";
+      const exportUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv${gidPart}`;
+      const r = await fetch(exportUrl, { headers: { Accept: "text/csv,*/*" }, redirect: "follow" });
+      if (!r.ok) {
+        return res.json({
+          text: null, type: "sheet", requiresAuth: true,
+          authUrl: GOOGLE_CLIENT_ID ? "/api/google-auth/url" : null,
+          error: `Sheet requires Google login (${r.status}). Visit /api/google-auth/url to authorise.`,
+        });
+      }
+      const text = await r.text();
+      return res.json({ text: text.slice(0, 50000), type: "sheet", chars: text.length, authenticated: false });
+    }
+
+    if (docsMatch) {
+      const docId = docsMatch[1];
+      const accessToken = await getGoogleAccessToken();
+      const headers = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+      const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
+      const r = await fetch(exportUrl, { headers: { Accept: "text/plain,*/*", ...headers }, redirect: "follow" });
+      if (!r.ok) return res.json({ text: null, type: "doc", requiresAuth: true, error: `Doc fetch failed (${r.status})` });
+      const text = await r.text();
+      return res.json({ text: text.slice(0, 50000), type: "doc", chars: text.length });
+    }
+
+    return res.status(400).json({ error: "Unrecognised Google Drive URL format" });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Google Drive fetch failed" });
+  }
+});
+
+// Delete local Drive files after UAT (explicit user confirmation required on frontend)
+app.post("/api/local-drive-cleanup", async (req, res) => {
+  const { files } = req.body || {};
+  if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ error: "files array required" });
+  const gDriveLocal = process.env.GDRIVE_LOCAL_PATH || path.join(os.homedir(), "Google Drive", "My Drive");
+  const deleted = [], failed = [];
+  for (const filePath of files) {
+    const resolved = path.resolve(filePath);
+    // Safety: only delete files inside the Drive folder
+    if (!resolved.startsWith(path.resolve(gDriveLocal)) && !resolved.startsWith(path.resolve(path.join(os.homedir(), "My Drive")))) {
+      failed.push({ path: filePath, reason: "Path outside Google Drive folder — refused" });
+      continue;
+    }
+    try {
+      fs.unlinkSync(resolved);
+      deleted.push(filePath);
+    } catch (e) {
+      failed.push({ path: filePath, reason: e.message });
+    }
+  }
+  res.json({ deleted, failed });
+});
+
+function findFileInDir(dir, filename, depth = 0) {
+  if (depth > 5) return null;
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isFile() && ent.name.toLowerCase() === filename.toLowerCase()) return full;
+      if (ent.isDirectory()) {
+        const found = findFileInDir(full, filename, depth + 1);
+        if (found) return found;
+      }
+    }
+  } catch {}
+  return null;
+}
 
 function looksLikeJiraAccountId(s) {
   const t = String(s || "").trim();
