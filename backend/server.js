@@ -1,4 +1,6 @@
 import express from "express";
+import { createServer as _netCreateServer } from "net";
+import { spawn as _spawnProc } from "child_process";
 import cors from "cors";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
@@ -1498,6 +1500,41 @@ app.get("/api/llm-usage-daily", (req, res) => {
     res.json({ success: true, days: summary, inMemory24hByProvider: buildLlmUsageSummary() });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Alpha agent health-check + auto-start
+
+function isPortListening(port) {
+  return new Promise((resolve) => {
+    const s = _netCreateServer();
+    s.once("error", () => resolve(true));   // EADDRINUSE → port in use → alive
+    s.once("listening", () => { s.close(); resolve(false); });
+    s.listen(port, "127.0.0.1");
+  });
+}
+
+let _alphaStarting = false;
+
+app.get("/api/alpha/status", async (req, res) => {
+  try {
+    const alive = await isPortListening(3050);
+    if (!alive && !_alphaStarting) {
+      _alphaStarting = true;
+      const webUiDir = path.join(__dirname, "..", "alpha-web-ui");
+      const child = _spawnProc("npm", ["run", "dev"], {
+        cwd: webUiDir,
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env },
+      });
+      child.unref();
+      setTimeout(() => { _alphaStarting = false; }, 30000);
+      return res.json({ status: "starting" });
+    }
+    res.json({ status: alive ? "running" : "starting" });
+  } catch (e) {
+    res.json({ status: "error", error: e.message });
   }
 });
 
