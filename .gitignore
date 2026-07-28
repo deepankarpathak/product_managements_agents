@@ -25,7 +25,13 @@
 .env
 # Cursor IDE — never commit local MCP config, debug logs, or secrets
 .cursor/
-.claude/
+# .claude/ is no longer blanket-ignored — commands/ and skills/ are now
+# committed so cloud/mobile Claude Code sessions can use them. Only the
+# machine-local noise below stays excluded.
+.claude/settings.local.json
+.claude/worktrees/
+.claude/*.log
+.claude/.DS_Store
 .env.local
 .env.development.local
 .env.test.local
