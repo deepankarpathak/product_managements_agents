@@ -4,7 +4,12 @@ description: >
   Send an end-of-day Jira worklog digest — Jira ID, Subject, duration logged,
   and current status for every ticket the user logged time against today (T)
   and yesterday (T-1), plus a total-minutes-per-day rollup — over Slack and
-  Email (recipient from `LOGWORK_SUMMARY_TO` in prd-agent/.env). Trigger on
+  Email (recipient from `LOGWORK_SUMMARY_TO` in prd-agent/.env). Consolidates
+  worklogs from BOTH configured Jira sites — primary finmate.atlassian.net
+  (anchor epic TSP-7853) and secondary mypaytm.atlassian.net (anchor epic
+  TPAP-8885) — into one merged total per day; if either site is unreachable
+  this run, it's excluded from the total and called out explicitly rather than
+  silently under-reporting. Trigger on
   `/logwork-summary`, "end of day summary", "EOD summary", "send worklog
   summary", "how much did I log today", or when a daily ~22:00 IST scheduled
   job fires this skill. Companion to /logwork, which creates the sub-tasks and
@@ -60,12 +65,20 @@ Never print `JIRA_TOKEN`, `EMAIL_PASS`, or the Slack webhook URL in any output.
 - `TODAY` = current date (`YYYY-MM-DD`, IST).
 - `YESTERDAY` = `TODAY` minus 1 day.
 - Jira base: same routing as `/logwork` Step 5 — for this digest, query BOTH
-  `JIRA_URL` and `JIRA_URL_2` if both are set (worklogs may live on either
-  site), and merge results. If only one is configured, use that one.
+  `JIRA_URL` (finmate, anchor epic TSP-7853) and `JIRA_URL_2` (mypaytm, anchor
+  epic TPAP-8885) if both are set (worklogs may live on either site), and
+  **consolidate** the totals across both — this is a hard requirement, not an
+  optional nicety, since the two anchors are where `/logwork` parks ad-hoc time
+  by default. If only one is configured, use that one.
 - Account id (fetch once per Jira base in play):
   ```bash
-  ACCOUNT_ID=$(curl -s -u "$JIRA_EMAIL:$TOKEN" "$JIRA_BASE/rest/api/3/myself" | jq -r '.accountId')
+  ACCOUNT_ID=$(curl -s -u "$JIRA_EMAIL:$TOKEN" "$JIRA_BASE/rest/api/3/myself" | jq -r '.accountId // empty')
   ```
+  If this returns empty for a given base (site unreachable this session —
+  connector not granted, network policy block, etc.), skip that base for both
+  dates rather than failing the whole digest, and record it as a skipped site
+  to surface in Step 7 — never present a total as complete when a site
+  couldn't be reached.
 
 ---
 
@@ -93,6 +106,9 @@ Sum all durations for the date → `TOTAL_<DATE>`.
 
 If an issue key is not accessible on the base it wasn't found under, just skip
 it silently for that base (it'll be found on the other base's pass instead).
+If an entire base was unreachable (per Step 2), its worklogs are simply absent
+from the merged rows/total for both dates — this is NOT silent at the report
+level (see Step 7), only at the per-issue level above.
 
 ---
 
@@ -173,10 +189,13 @@ Skip this step (and note it in the final report) if `EMAIL_SMTP_HOST` or
 
 ```
 # Summary
-Sent EOD work-log digest for <TODAY> and <YESTERDAY> — <N> ticket(s) today
-(<TOTAL_TODAY>), <M> ticket(s) yesterday (<TOTAL_YESTERDAY>).
+Sent EOD work-log digest for <TODAY> and <YESTERDAY> (consolidated across
+finmate + mypaytm) — <N> ticket(s) today (<TOTAL_TODAY>), <M> ticket(s)
+yesterday (<TOTAL_YESTERDAY>).
 Slack: <sent / skipped — reason>
 Email: <sent / skipped — reason>
+<If any Jira site was unreachable this run: "Note: <site> was unreachable — its worklogs are not included in the totals above.">
+
 ```
 
 Keep this final message short — the full table already went out over

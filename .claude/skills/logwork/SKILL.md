@@ -4,17 +4,24 @@ description: >
   Create a Jira sub-task and log actual time spent (worklog) against it, from five
   free-form inputs: Subject, Description, Start time, Meeting time (minutes), and
   JIRA ID. Trigger on `/logwork`, "log work", "log today's work", "log this meeting
-  on Jira", or any request to record time spent against a Jira ticket. If no JIRA ID
-  is given, default to TPAP-8885 (https://mypaytm.atlassian.net/browse/TPAP-8885).
-  Drives the sub-task through Solution & Zeplin Review -> In Progress -> Closed
-  itself (work is only ever logged while the sub-task is In Progress). Enforces a
-  global 540 min/day (9h) worklog cap across ALL of the user's Jira worklogs that
-  day, and reports remaining minutes for the day after every run. Talks to the Jira
-  Cloud REST API directly via curl using credentials already in prd-agent/.env —
-  does not modify prd-agent/backend/server.js, the prd-agent-tools MCP, or any
-  other skill (/jiragenerator, /uatmaster,
+  on Jira", or any request to record time spent against a Jira ticket. Two Jira
+  sites are in play — primary `JIRA_URL` (finmate.atlassian.net) and secondary
+  `JIRA_URL_2` (mypaytm.atlassian.net) — each with its own default anchor epic for
+  ad-hoc/unplanned work: TPAP-8885 (https://mypaytm.atlassian.net/browse/TPAP-8885)
+  is the default when no JIRA ID is given at all; TSP-7853
+  (https://finmate.atlassian.net/browse/TSP-7853) is the default when logging
+  against the finmate/TSP board without a specific ticket. An explicit ticket key
+  always wins over either anchor. Drives the sub-task through Solution & Zeplin
+  Review -> In Progress -> Closed itself (work is only ever logged while the
+  sub-task is In Progress). Enforces a global 540 min/day (9h) worklog cap
+  consolidated across ALL of the user's Jira worklogs that day on BOTH sites (not
+  just ones this skill created), and reports remaining minutes for the day after
+  every run. Talks to the Jira Cloud REST API directly via curl using credentials
+  already in prd-agent/.env — does not modify prd-agent/backend/server.js, the
+  prd-agent-tools MCP, or any other skill (/jiragenerator, /uatmaster,
   /tsp-compliance-service-jira-generator are untouched and unaffected). Companion
-  skill /logwork-summary sends an end-of-day Slack+Email digest of the same data.
+  skill /logwork-summary sends an end-of-day Slack+Email digest of the same
+  dual-site data.
 ---
 
 # /logwork — Jira Sub-task + Worklog Skill
@@ -44,17 +51,38 @@ Always use `/rest/api/3/search/jql` for JQL searches in this skill.
 | Description | Yes | Free text — raw notes, gets turned into a professional work log |
 | Start time | Yes | Date + time the work started, e.g. `2026-07-14 09:00` or `9am today` |
 | Meeting time | Yes | Minutes spent, e.g. `45` |
-| JIRA ID | No | Parent issue to attach the sub-task to. Default: `TPAP-8885` (`https://mypaytm.atlassian.net/browse/TPAP-8885`) |
+| JIRA ID | No | Parent issue to attach the sub-task to. See site-anchor defaults below — an explicit ticket key always wins over either anchor. |
 
-Never block on missing JIRA ID — apply the default. Only ask a clarifying question
-if Subject, Description, Start time, or Meeting time is genuinely absent from the
-request.
+Never block on missing JIRA ID — apply the site-anchor default. Only ask a
+clarifying question if Subject, Description, Start time, or Meeting time is
+genuinely absent from the request.
+
+**Site anchors** (two Jira sites are configured — `JIRA_URL` = finmate.atlassian.net,
+`JIRA_URL_2` = mypaytm.atlassian.net):
+
+| Situation | Parent used |
+|---|---|
+| No JIRA ID given at all | `TPAP-8885` — `https://mypaytm.atlassian.net/browse/TPAP-8885` |
+| A site/board is indicated (e.g. "log this on finmate" / "on the TSP board") but no specific ticket number | Site's anchor: `TSP-7853` for finmate/TSP, `TPAP-8885` for mypaytm/TPAP |
+| A specific ticket key is given (either site) | Use it verbatim as `JIRA_ID` — never overridden by an anchor |
 
 ---
 
 ## Step 1 — Fill defaults
 
-- No JIRA ID given → `JIRA_ID = TPAP-8885`.
+- No JIRA ID given → `JIRA_ID = TPAP-8885` (mypaytm/TPAP anchor epic).
+- Site named but no specific ticket number → use that site's anchor: `TSP-7853`
+  for finmate/TSP, `TPAP-8885` for mypaytm/TPAP.
+- Specific ticket key given (either site) → use it verbatim; anchors never
+  override an explicit ticket.
+- **Secondary-site fallback:** if `JIRA_ID` resolves to `JIRA_URL_2` (mypaytm/TPAP)
+  but that site is unreachable this session (connector not granted, network
+  policy block, etc.) and no more specific ticket was given, fall back to the
+  finmate/TSP anchor (`TSP-7853`) rather than failing the whole request — but
+  always say so explicitly in Step 6's Assumptions section; never substitute
+  sites silently. If a *specific* mypaytm ticket was named and that site is
+  unreachable, don't silently reroute it to TSP-7853 — stop and surface the
+  reachability problem instead (see Error handling).
 - Parse Start time into a concrete datetime (resolve "today"/"yesterday"/"9am" against
   the current date). Assume IST (`+0530`) unless the user states another timezone.
 - `LOG_DATE` = the date portion (`YYYY-MM-DD`) of the resolved Start time — the
@@ -104,7 +132,9 @@ reference, not modified): `PROJECT_KEY` = the part of `JIRA_ID` before the
 `-`; if it's in `JIRA_SECONDARY_PROJECT_KEYS` (env, default `TPAP,PCO,TPG`) →
 base = `JIRA_URL_2` (fallback `JIRA_URL`); otherwise base = `JIRA_URL`
 (fallback `JIRA_URL_2`). If both empty, stop and ask the user to configure
-`JIRA_URL_2` (for `TPAP-8885` this is `https://mypaytm.atlassian.net`).
+`JIRA_URL_2` (for `TPAP-8885` this is `https://mypaytm.atlassian.net`). This
+`JIRA_BASE` is only where the NEW sub-task for this run gets created — the
+daily-cap check below is separate and always consolidates across BOTH sites.
 
 Sub-task issue type for project `TPAP` is known to be `10038` — use it
 directly rather than re-querying `createmeta` on every run; only fall back to
@@ -126,31 +156,46 @@ case ",${JIRA_SECONDARY_PROJECT_KEYS:-TPAP,PCO,TPG}," in
 esac
 SUBTASK_TYPE_ID="${JIRA_SUBTASK_ISSUE_TYPE_NAME:-10038}"
 
-ACCOUNT_ID=$(~/.claude/skills/logwork/jira-curl.sh "$JIRA_BASE/rest/api/3/myself" | jq -r '.accountId')
-KEYS=$(~/.claude/skills/logwork/jira-curl.sh -G "$JIRA_BASE/rest/api/3/search/jql" \
-  --data-urlencode "jql=worklogAuthor = \"$ACCOUNT_ID\" AND worklogDate = \"$LOG_DATE\"" \
-  --data-urlencode "fields=summary" | jq -r '.issues[].key')
+# Daily cap is consolidated across BOTH sites (JIRA_URL primary + JIRA_URL_2
+# secondary), not just the one this run's sub-task will be created on — a
+# site that's unreachable this session (network policy block, connector not
+# granted, etc.) is skipped for its contribution rather than failing the
+# whole check; note any skipped site in Step 6's Assumptions.
 EXISTING_SECONDS=0
-# while-read, not `for K in $KEYS` — the latter silently fails to split on
-# newlines under zsh (no shwordsplit), collapsing all keys into one bogus
-# iteration and reporting EXISTING_SECONDS=0. while-read is portable.
-while IFS= read -r K; do
-  [ -n "$K" ] || continue
-  SECS=$(~/.claude/skills/logwork/jira-curl.sh "$JIRA_BASE/rest/api/3/issue/$K/worklog" \
-    | jq --arg acc "$ACCOUNT_ID" --arg date "$LOG_DATE" \
-      '[.worklogs[] | select(.author.accountId == $acc and (.started | startswith($date))) | .timeSpentSeconds] | add // 0')
-  EXISTING_SECONDS=$((EXISTING_SECONDS + SECS))
-done <<< "$KEYS"
+ACCOUNT_ID=""
+UNREACHABLE_SITES=""
+for BASE in "$JIRA_URL" "$JIRA_URL_2"; do
+  [ -n "$BASE" ] || continue
+  ACC=$(~/.claude/skills/logwork/jira-curl.sh "$BASE/rest/api/3/myself" 2>/dev/null | jq -r '.accountId // empty' 2>/dev/null)
+  if [ -z "$ACC" ]; then UNREACHABLE_SITES="${UNREACHABLE_SITES}${BASE},"; continue; fi
+  [ "$BASE" = "$JIRA_BASE" ] && ACCOUNT_ID="$ACC"
+  KEYS=$(~/.claude/skills/logwork/jira-curl.sh -G "$BASE/rest/api/3/search/jql" \
+    --data-urlencode "jql=worklogAuthor = \"$ACC\" AND worklogDate = \"$LOG_DATE\"" \
+    --data-urlencode "fields=summary" | jq -r '.issues[].key')
+  # while-read, not `for K in $KEYS` — the latter silently fails to split on
+  # newlines under zsh (no shwordsplit), collapsing all keys into one bogus
+  # iteration and reporting EXISTING_SECONDS=0. while-read is portable.
+  while IFS= read -r K; do
+    [ -n "$K" ] || continue
+    SECS=$(~/.claude/skills/logwork/jira-curl.sh "$BASE/rest/api/3/issue/$K/worklog" \
+      | jq --arg acc "$ACC" --arg date "$LOG_DATE" \
+        '[.worklogs[] | select(.author.accountId == $acc and (.started | startswith($date))) | .timeSpentSeconds] | add // 0')
+    EXISTING_SECONDS=$((EXISTING_SECONDS + SECS))
+  done <<< "$KEYS"
+done
 REMAINING_BEFORE=$((32400 - EXISTING_SECONDS))
-echo "JIRA_BASE=$JIRA_BASE PROJECT_KEY=$PROJECT_KEY SUBTASK_TYPE_ID=$SUBTASK_TYPE_ID ACCOUNT_ID=$ACCOUNT_ID EXISTING_SECONDS=$EXISTING_SECONDS REMAINING_BEFORE=$REMAINING_BEFORE"
+echo "JIRA_BASE=$JIRA_BASE PROJECT_KEY=$PROJECT_KEY SUBTASK_TYPE_ID=$SUBTASK_TYPE_ID ACCOUNT_ID=$ACCOUNT_ID EXISTING_SECONDS=$EXISTING_SECONDS REMAINING_BEFORE=$REMAINING_BEFORE UNREACHABLE_SITES=$UNREACHABLE_SITES"
 ```
 
 `CAP_SECONDS = 32400` (540 min). This is a **global** rule — counts every
-worklog the user logged that day across ALL Jira tickets, not just ones this
-skill created. **If `TIME_SPENT_SECONDS > REMAINING_BEFORE`**: stop here, do
-not create the sub-task. Report minutes already logged, minutes remaining,
-and the shortfall — hard block, not a warning. Otherwise continue;
-`REMAINING_AFTER = REMAINING_BEFORE - TIME_SPENT_SECONDS` for the final report.
+worklog the user logged that day across ALL Jira tickets on BOTH sites, not
+just ones this skill created. **If `TIME_SPENT_SECONDS > REMAINING_BEFORE`**:
+stop here, do not create the sub-task. Report minutes already logged, minutes
+remaining, and the shortfall — hard block, not a warning. Otherwise continue;
+`REMAINING_AFTER = REMAINING_BEFORE - TIME_SPENT_SECONDS` for the final
+report. If `UNREACHABLE_SITES` is non-empty, the cap total only reflects the
+reachable site(s) — say so in Step 6's Assumptions rather than presenting it
+as a complete total.
 
 ---
 
@@ -310,8 +355,10 @@ Parent: <JIRA_ID> — <jira_base>/browse/<JIRA_ID>
 <any inferred defaults — timezone, next steps, etc.>
 
 ## Daily cap
-Logged on <LOG_DATE>: <existing + new, formatted Xh Ym> / 9h 0m used.
+Logged on <LOG_DATE> (consolidated across finmate + mypaytm): <existing + new, formatted Xh Ym> / 9h 0m used.
 Remaining today: <REMAINING_AFTER, formatted Xh Ym>.
+<If UNREACHABLE_SITES is non-empty: "Note: <site> was unreachable this session — its worklogs are not included in this total.">
+
 
 ## SOP Validation
 ✓ Parent — <JIRA_ID>
@@ -332,7 +379,9 @@ and always state remaining minutes for the day — before finishing.
 |---|---|
 | `JIRA_EMAIL`/token missing | Stop, tell user to set them in `prd-agent/.env` |
 | Neither `JIRA_URL` nor `JIRA_URL_2` resolves for the project key | Stop, ask user to set the right one |
-| Daily cap: this entry would exceed 540 min for `LOG_DATE` | Hard stop before creating anything. Report minutes already logged, minutes remaining, and the shortfall |
+| A specific ticket was named on a site that's unreachable this session | Stop before creating anything — surface the reachability problem (don't silently reroute a *named* ticket to the other site's anchor) |
+| No specific ticket named, and the site that would apply (by anchor default) is unreachable | Fall back to the other site's anchor (TSP-7853 for finmate, TPAP-8885 for mypaytm) and proceed, but state the substitution explicitly in Step 6's Assumptions |
+| Daily cap: this entry would exceed 540 min for `LOG_DATE` | Hard stop before creating anything. Report minutes already logged (consolidated across both sites, noting any `UNREACHABLE_SITES`), minutes remaining, and the shortfall |
 | Sub-task issue type lookup returns nothing | Fall back to `{"name": "Sub-task"}` |
 | Create call returns `errorMessages`/`errors` | Surface Jira's exact error, do not retry silently |
 | No transition to "In Progress" found from create status | Stop before logging work — surface the workflow gap, do not log time in the wrong status |
