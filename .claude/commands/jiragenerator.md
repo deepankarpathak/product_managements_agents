@@ -13,9 +13,9 @@ Call `mcp__prd-agent-tools__check_agents_health`. If backend (port 5000) is down
 
 Collect, asking only for what's missing from `$ARGUMENTS`/conversation:
 - **Feature / ticket title** — short name
-- **Project key** — e.g. `TSP`, `TPAP` (call `mcp__prd-agent-tools__jira_get_issue` on a sample key first if unsure which site it lives on)
+- **Project keys** — always both `TSP` and `TPAP` boards, unless user explicitly says to file in only one. Never ask for this.
 - **Requirement / context** — the actual ask; if user gives a reference JIRA key instead, call `jira_get_issue` to pull its summary/description/AC into context
-- **Issue type** — default `Task` (or `Story`/`Bug`/`Epic` if user says so)
+- **Issue type** — always `Epic`, unless user explicitly says otherwise. Never ask for this.
 - **Parent JIRA** — if the user doesn't explicitly give one, default to `TSP-5175` (https://finmate.atlassian.net/browse/TSP-5175). Never ask for this — only override it when the user names a different parent.
 - **Sub-tasks wanted?** — yes/no
 
@@ -84,16 +84,17 @@ Creating a ticket is visible to the whole team and hard to fully undo — **alwa
 
 ## 6. Create
 
-- No sub-tasks: call `mcp__prd-agent-tools__jira_create_issue` with `projectKey`, `summary`, `description` (the markdown), `issueType`.
-- With sub-tasks: call `mcp__prd-agent-tools__jira_create_with_subtasks` with `projectKey`, `parentSummary`, `parentDescription`, `parentIssueType`, `subtasks: [{summary, description}]`.
-- If this project requires extra fields (e.g. TSP requires `duedate` and the cascading `Work Category & Sub Category` custom field), that call will 400 with the exact missing field names — pick sensible defaults (due date from the rollout plan if stated, else a reasonable near-term date; category from context) and retry via the Atlassian MCP `createJiraIssue` tool's `additional_fields`, then tell the user what you defaulted so they can correct it.
+Create the Epic once per board (`TSP` and `TPAP`, both by default) — same title/description on each unless the user asked for board-specific differences:
+- No sub-tasks: call `mcp__prd-agent-tools__jira_create_issue` with `projectKey`, `summary`, `description` (the markdown), `issueType: "Epic"` — once per project key.
+- With sub-tasks: call `mcp__prd-agent-tools__jira_create_with_subtasks` with `projectKey`, `parentSummary`, `parentDescription`, `parentIssueType: "Epic"`, `subtasks: [{summary, description}]` — once per project key.
+- If a project requires extra fields (e.g. TSP requires `duedate` and the cascading `Work Category & Sub Category` custom field), that call will 400 with the exact missing field names — pick sensible defaults (due date from the rollout plan if stated, else a reasonable near-term date; category from context) and retry via the Atlassian MCP `createJiraIssue` tool's `additional_fields`, then tell the user what you defaulted so they can correct it.
 
 ## 6a. Link to Parent JIRA
 
-Attach the new issue to its Parent JIRA (resolved in Step 1 — user-given, or `TSP-5175` default):
-- Try setting `parent` on the new issue (Atlassian MCP `editJiraIssue`, `fields: {parent: {key: PARENT_KEY}}`). This only works when the new issue's type sits directly one level below the parent's in the project's issue-type hierarchy (e.g. Story under Epic).
-- If that call errors with `"Given parent work item does not belong to appropriate hierarchy"` (e.g. creating an Epic under a Story/Task-level parent — Epics can only nest under an Initiative) — fall back to `mcp__e8cba8d5-f96c-46b4-88b7-6ead354c5ba0__createIssueLink` with `type: "Relates"`, `inwardIssue: PARENT_KEY`, `outwardIssue: NEW_KEY`. Tell the user it's linked via "Relates to" instead of true parent, and why.
+For each board's new Epic, attach it to its Parent JIRA (resolved in Step 1 — user-given, or `TSP-5175` default for TSP; for TPAP, use the same parent only if it's reachable from that board, otherwise skip parent-linking for TPAP and just report the standalone Epic key):
+- Try setting `parent` on the new issue (Atlassian MCP `editJiraIssue`, `fields: {parent: {key: PARENT_KEY}}`). This only works when the new issue's type sits directly one level below the parent's in the project's issue-type hierarchy, and when both issues share a project (cross-project `parent` typically errors even at matching hierarchy levels).
+- If that call errors (e.g. `"Given parent work item does not belong to appropriate hierarchy"`, or cross-project rejection) — fall back to `mcp__e8cba8d5-f96c-46b4-88b7-6ead354c5ba0__createIssueLink` with `type: "Relates"`, `inwardIssue: PARENT_KEY`, `outwardIssue: NEW_KEY`. Tell the user it's linked via "Relates to" instead of true parent, and why.
 
 ## 7. Report
 
-Give the user the created key(s) and browse URL(s) from the tool response. If any sub-task failed to create, call it out by summary (the tool returns per-item errors, not just an overall failure).
+List both created Epic keys and browse URLs (TSP and TPAP) from the tool responses, and how each was linked (parent vs Relates). If any sub-task or board creation failed, call it out by summary (the tool returns per-item errors, not just an overall failure).

@@ -406,6 +406,7 @@ export default function Chat({ agent }: { agent?: AgentUi }) {
         patchAssistant(chatId, (a) => {
           a.cost = evt.cost_usd;
           a.done = true;
+          if (evt.is_error) a.error = evt.result || "Request failed";
         });
         break;
       case "error":
@@ -415,6 +416,29 @@ export default function Chat({ agent }: { agent?: AgentUi }) {
         });
         break;
     }
+  };
+
+  // Drop the failed user+assistant pair and resend the same text as a fresh
+  // turn. Safe even when the failure happened before the CLI ever echoed a
+  // session/init event (e.g. spawn error, trust-dialog block) since we also
+  // roll `turns` back — the retry goes out with the same resume/session
+  // state the original attempt should have used.
+  const retry = (chatId: string) => {
+    const chat = chats.find((c) => c.id === chatId);
+    if (!chat || busy) return;
+    const msgs = chat.messages;
+    const last = msgs[msgs.length - 1];
+    if (!last || last.role !== "assistant") return;
+    const prev = msgs[msgs.length - 2];
+    if (!prev || prev.role !== "user") return;
+    const text = prev.text;
+
+    updateChat(chatId, (c) => ({
+      ...c,
+      turns: Math.max(0, c.turns - 1),
+      messages: c.messages.slice(0, -2),
+    }));
+    send(text);
   };
 
   const onKey = (e: React.KeyboardEvent) => {
@@ -563,7 +587,17 @@ export default function Chat({ agent }: { agent?: AgentUi }) {
           {messages.length === 0 ? (
             <Empty cfg={cfg} onPick={(q) => send(q)} />
           ) : (
-            messages.map((m, i) => <MessageView key={i} m={m} />)
+            messages.map((m, i) => (
+              <MessageView
+                key={i}
+                m={m}
+                onRetry={
+                  i === messages.length - 1 && !busy
+                    ? () => retry(activeId)
+                    : undefined
+                }
+              />
+            ))
           )}
         </div>
       </div>
@@ -713,7 +747,13 @@ function Empty({
   );
 }
 
-function MessageView({ m }: { m: Message }) {
+function MessageView({
+  m,
+  onRetry,
+}: {
+  m: Message;
+  onRetry?: () => void;
+}) {
   if (m.role === "user") {
     return (
       <div className="mb-5 flex justify-end gap-3">
@@ -771,7 +811,15 @@ function MessageView({ m }: { m: Message }) {
         {m.error && (
           <div className="mt-2 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-            <span className="whitespace-pre-wrap">{m.error}</span>
+            <span className="flex-1 whitespace-pre-wrap">{m.error}</span>
+            {onRetry && (
+              <button
+                onClick={onRetry}
+                className="shrink-0 rounded-lg border border-rose-300 bg-white px-2 py-1 text-[11px] font-semibold text-rose-700 transition hover:bg-rose-100"
+              >
+                Retry
+              </button>
+            )}
           </div>
         )}
 

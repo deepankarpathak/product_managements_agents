@@ -12,6 +12,10 @@
         "PRD_AGENT_ANALYST_URL": "http://localhost:3040",
         "PRD_AGENT_LLM_PROVIDER": "auto"
       }
+    },
+    "jira-mcp": {
+      "command": "node",
+      "args": ["./mcp/jira-mcp/index.js"]
     }
   }
 }
