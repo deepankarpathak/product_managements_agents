@@ -5,6 +5,7 @@ import cors from "cors";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 import https from "https";
+import tls from "tls";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -17,6 +18,11 @@ import { extractTextFromPDF, extractTextFromPDFBuffer } from "./pdfParser.js";
 import FormData from "form-data";
 import { retrieve as ragRetrieve } from "./rag/retrieve.js";
 import { buildDocsKnowledgeContext } from "./docsKnowledge.js";
+import { registerMorningDashboard } from "./morningDashboard.js";
+import { registerSrSnippet } from "./srSnippet.js";
+import { registerProductDashboard } from "./productDashboard.js";
+import { registerUtilities } from "./utilities.js";
+import { createHistoryStore, registerHistory } from "./historyStore.js";
 import {
   converseBedrock,
   isBedrockConfigured,
@@ -2186,6 +2192,7 @@ async function sendJiraAgentCreatedEmail({ issueKeys, summary, domainLabels }) {
       host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
       port: Number(process.env.EMAIL_SMTP_PORT) || 587,
       secure: process.env.EMAIL_SECURE === "true",
+      requireTLS: process.env.EMAIL_SECURE !== "true",
       auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
     };
     const transporter = nodemailer.createTransport(transportOpts);
@@ -2654,11 +2661,28 @@ app.post("/api/jira/create-with-subtasks", async (req, res) => {
 
 // ── Share: JIRA comment, Telegram, Email ─────────────────────────────────────
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-/** Corporate SSL inspection: set TELEGRAM_INSECURE_TLS=true in .env (dev only). */
+/**
+ * Corporate SSL inspection (e.g. Zscaler): set EXTRA_CA_CERT_FILE=/path/to/root-ca.pem in .env
+ * to trust the proxy's root CA while keeping certificate verification on.
+ * TELEGRAM_INSECURE_TLS=true disables verification entirely — last resort, never on untrusted networks.
+ */
+function loadExtraCa() {
+  const file = process.env.EXTRA_CA_CERT_FILE;
+  if (!file) return null;
+  try {
+    return fs.readFileSync(file.replace(/^~(?=\/)/, os.homedir()), "utf8");
+  } catch (e) {
+    console.warn(`[tls] EXTRA_CA_CERT_FILE unreadable (${file}): ${e.message}`);
+    return null;
+  }
+}
+const extraCaPem = loadExtraCa();
 const telegramHttpsAgent =
   process.env.TELEGRAM_INSECURE_TLS === "true"
     ? new https.Agent({ rejectUnauthorized: false })
-    : undefined;
+    : extraCaPem
+      ? new https.Agent({ ca: [...tls.rootCertificates, extraCaPem] })
+      : undefined;
 
 async function telegramApiSendMessage(chatId, textBody, parseMode) {
   const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -2810,6 +2834,7 @@ app.post("/api/share/email", async (req, res) => {
       host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
       port: Number(process.env.EMAIL_SMTP_PORT) || 587,
       secure: process.env.EMAIL_SECURE === "true",
+      requireTLS: process.env.EMAIL_SECURE !== "true",
       auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
     };
     const transporter = nodemailer.createTransport(transportOpts);
@@ -2962,6 +2987,7 @@ app.post("/api/notify/complete", async (req, res) => {
           host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
           port: Number(process.env.EMAIL_SMTP_PORT) || 587,
           secure: process.env.EMAIL_SECURE === "true",
+          requireTLS: process.env.EMAIL_SECURE !== "true",
           auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
         };
         const transporter = nodemailer.createTransport(transportOpts);
@@ -3078,6 +3104,7 @@ app.post("/api/notify/analyst", async (req, res) => {
             host: process.env.EMAIL_SMTP_HOST || "smtp.gmail.com",
             port: Number(process.env.EMAIL_SMTP_PORT) || 587,
             secure: process.env.EMAIL_SECURE === "true",
+            requireTLS: process.env.EMAIL_SECURE !== "true",
             auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD } : undefined,
           };
           const transporter = nodemailer.createTransport(transportOpts);
@@ -3173,6 +3200,28 @@ app.post("/api/notify/analyst", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// Dashboard History — every Morning Dashboard / SR Snippet run (manual + scheduled) is
+// saved as Markdown under Query_Agent/AnaylsisAgent_output/history — /api/history/*
+const dashboardHistory = createHistoryStore({ rootDir: path.join(__dirname, "..", "Query_Agent", "AnaylsisAgent_output", "history") });
+
+// Morning Dashboard (SR / errors / U09 / bank) — /api/mdash/*
+const morningDashboard = registerMorningDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
+
+// Success Rate Snippet (P2M PSP / errors / instrument, D-1 vs L7D / MTD vs LMTD) — /api/srsnippet/*
+const srSnippet = registerSrSnippet(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
+
+// Product Wise dashboard (UPI International activation / txns / errors) — /api/product/*
+const productDashboard = registerProductDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
+registerHistory(app, {
+  history: dashboardHistory,
+  rerun: {
+    morning: (rec) => morningDashboard.rerun(rec.rerun || {}),
+    srsnippet: () => srSnippet.rerun(),
+    product: (rec) => productDashboard.rerun(rec.rerun || {}),
+  },
+});
+registerUtilities(app);
 
 // Production: serve frontend build from parent directory (single deploy)
 const buildPath = path.join(__dirname, "..", "build");

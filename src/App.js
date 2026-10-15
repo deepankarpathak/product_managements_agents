@@ -5,6 +5,11 @@ import BRDAgent from "./brd-agent.jsx";
 import JiraAgent from "./jira-agent.jsx";
 import AnalystAgentTab from "./analyst-agent.jsx";
 import AlphaAgent from "./alpha-agent.jsx";
+import MorningDashboard from "./morning-dashboard.jsx";
+import SrSnippet from "./sr-snippet.jsx";
+import ProductDashboard from "./product-dashboard.jsx";
+import Utilities from "./utilities.jsx";
+import DashboardHistory from "./dashboard-history.jsx";
 import ConnectorsStatus from "./ConnectorsStatus.jsx";
 import BackendWarningBanner from "./BackendWarningBanner.jsx";
 
@@ -14,9 +19,20 @@ const TAB_BRD = "brd";
 const TAB_JIRA = "jira";
 const TAB_ANALYST = "analyst";
 const TAB_ALPHA = "alpha";
+const TAB_MORNING = "morning";
+const TAB_SRSNIPPET = "srsnippet";
+const TAB_PRODUCT = "product";
+const TAB_UTILITIES = "utilities";
+const TAB_HISTORY = "history";
+
+// Bookmarkable: http://localhost:3000/#morning opens the Morning Dashboard,
+// #srsnippet the Success Rate Snippet, #product the Product Wise dashboard, #utilities the Utilities dashboard.
+// #history (optionally #history?dashboard=morning|srsnippet) opens the History tab.
+const HASH_TABS = { "#morning": TAB_MORNING, "#srsnippet": TAB_SRSNIPPET, "#product": TAB_PRODUCT, "#utilities": TAB_UTILITIES, "#history": TAB_HISTORY };
+const initialTab = () => HASH_TABS[window.location.hash.split("?")[0]] || TAB_PRD;
 
 function App() {
-  const [activeTab, setActiveTab] = useState(TAB_PRD);
+  const [activeTab, setActiveTab] = useState(initialTab);
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -138,6 +154,96 @@ function App() {
           α Alpha Agent
         </button>
 
+        <button
+          type="button"
+          onClick={() => setActiveTab(TAB_MORNING)}
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_MORNING ? "2px solid #fbbf24" : "2px solid transparent",
+            background: activeTab === TAB_MORNING ? "#1e293b" : "transparent",
+            color: activeTab === TAB_MORNING ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          ☀ Morning Dashboard
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab(TAB_SRSNIPPET)}
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_SRSNIPPET ? "2px solid #34d399" : "2px solid transparent",
+            background: activeTab === TAB_SRSNIPPET ? "#1e293b" : "transparent",
+            color: activeTab === TAB_SRSNIPPET ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          % Success Rate Snippet
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab(TAB_PRODUCT)}
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_PRODUCT ? "2px solid #fb923c" : "2px solid transparent",
+            background: activeTab === TAB_PRODUCT ? "#1e293b" : "transparent",
+            color: activeTab === TAB_PRODUCT ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          ▦ Product Wise
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab(TAB_UTILITIES)}
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_UTILITIES ? "2px solid #a78bfa" : "2px solid transparent",
+            background: activeTab === TAB_UTILITIES ? "#1e293b" : "transparent",
+            color: activeTab === TAB_UTILITIES ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          🛠 Utilities
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab(TAB_HISTORY)}
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_HISTORY ? "2px solid #f472b6" : "2px solid transparent",
+            background: activeTab === TAB_HISTORY ? "#1e293b" : "transparent",
+            color: activeTab === TAB_HISTORY ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          🕘 History
+        </button>
+
         {/* Connectors status — shared across all agents */}
         <div style={{ marginLeft: "auto" }}>
           <ConnectorsStatus />
@@ -163,6 +269,21 @@ function App() {
       </div>
       <div style={{ flex: 1, display: activeTab === TAB_ALPHA ? "block" : "none" }}>
         <AlphaAgent />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_MORNING ? "block" : "none" }}>
+        <MorningDashboard />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_SRSNIPPET ? "block" : "none" }}>
+        <SrSnippet />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_PRODUCT ? "block" : "none" }}>
+        <ProductDashboard />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_UTILITIES ? "block" : "none" }}>
+        <Utilities />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_HISTORY ? "block" : "none" }}>
+        <DashboardHistory active={activeTab === TAB_HISTORY} />
       </div>
     </div>
   );
