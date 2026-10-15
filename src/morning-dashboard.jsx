@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BreakdownBody, DeclinesBody, MorningKpiStrip } from "./morning-breakdown.jsx";
 
 // Morning Dashboard — UPI Success Rate, Error codes, U09, Bank-wise SR.
 // Talks to backend /api/mdash/*. Opening the page only reads cached results;
@@ -8,6 +9,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const API = "/api/mdash";
 
 const SECTION_TITLES = {
+  breakdown: "A · SR Breakdown — impact ranked (PSP / bank / instrument / flow)",
+  declines: "B · Decline Codes — NPCI description, ₹ amount, D-1…D-3",
   sr: "1 · Success Rate",
   errors: "2 · Error Code Analysis",
   u09: "3 · U09 Trend",
@@ -19,7 +22,7 @@ const SECTION_TITLES = {
   payerbank: "9 · Payer Bank Success Rate (DoD)",
   errbreak: "10 · Error-wise Breakup (app_resp_code)",
 };
-const SECTION_IDS = ["sr", "errors", "u09", "bank", "share", "flowsr", "instrument", "psp", "payerbank", "errbreak"];
+const SECTION_IDS = ["breakdown", "declines", "sr", "errors", "u09", "bank", "share", "flowsr", "instrument", "psp", "payerbank", "errbreak"];
 
 // Per-section duration options come from the backend (/state.durationOptions):
 // [{ key: "4h", kind: "intraday" }, { key: "3d", kind: "daily" }, …]. "daily" keys read the
@@ -671,7 +674,7 @@ function scheduleText(sched) {
   return `auto-refresh ${what}${next ? ` · next ${next}` : ""}`;
 }
 
-function SectionCard({ id, job, result, cfg, duration, setDuration, now, onRun, onStop, onRetryNow, children, controls, sched }) {
+function SectionCard({ id, job, result, cfg, duration, setDuration, now, onRun, onStop, onRetryNow, children, controls, sched, noView = false }) {
   const [view, setView] = useState(() => lsGet(`view:${id}`, "chart"));
   const [showSql, setShowSql] = useState(false);
   const [sql, setSql] = useState(null);
@@ -693,7 +696,7 @@ function SectionCard({ id, job, result, cfg, duration, setDuration, now, onRun, 
   };
 
   return (
-    <section style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16, marginBottom: 16 }}>
+    <section id={`mdash-${id}`} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16, marginBottom: 16, scrollMarginTop: 70 }}>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 10 }}>
         <h2 style={{ margin: 0, fontSize: 15, color: C.text, fontWeight: 700 }}>{SECTION_TITLES[id]}</h2>
         <StatusChip job={job} now={now} />
@@ -706,7 +709,7 @@ function SectionCard({ id, job, result, cfg, duration, setDuration, now, onRun, 
               </option>
             ))}
           </select>
-          <Seg value={view} onChange={setView} options={[["chart", "Trend"], ["table", "Table"]]} />
+          {!noView && <Seg value={view} onChange={setView} options={[["chart", "Trend"], ["table", "Table"]]} />}
           <button type="button" style={btn()} onClick={toggleSql}>
             {showSql ? "Hide SQL" : "SQL"}
           </button>
@@ -1932,6 +1935,9 @@ export default function MorningDashboard() {
   const [flowLite, setFlowLite] = useState(false);
   const [instGrain, setInstGrain] = useState(() => lsGet("grain:instrument", "day"));
   const [errbMetric, setErrbMetric] = useState("count");
+  // Cross-links between A (breakdown) and B (decline codes).
+  const [driverCode, setDriverCode] = useState(null); // A: which rows drive this code
+  const [declineFocus, setDeclineFocus] = useState(null); // B: focus this code
   useEffect(() => lsSet("grain.v2:flowsr", flowGrain), [flowGrain]);
   useEffect(() => lsSet("grain:instrument", instGrain), [instGrain]);
   const skew = useRef(0);
@@ -2034,6 +2040,7 @@ export default function MorningDashboard() {
     );
   }
 
+  const jumpTo = (id) => document.getElementById(`mdash-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   const failedCount = SECTION_IDS.filter((id) => ["failed", "retry-wait"].includes(state.jobs[id]?.status)).length;
   const common = (id) => ({
     id,
@@ -2105,7 +2112,7 @@ export default function MorningDashboard() {
           <button
             type="button"
             onClick={toggleSchedule}
-            title="Backend refresh schedule (daily 08:00/11:00 for Looker sections, every 30–60 min for raw-txn sections, 07:00–23:00)"
+            title="Backend refresh schedule (IST): raw-txn sections at 07:00, 10:30, 15:00, 19:30, 23:00; day-level Looker sections at 07:00 and 10:30"
             style={{ ...btn(), color: cfg.schedule?.enabled ? "#86efac" : C.text2 }}
           >
             Auto-refresh: {cfg.schedule?.enabled ? "On" : "Off"}
@@ -2125,6 +2132,38 @@ export default function MorningDashboard() {
           <ConfigPage state={state} now={now} durations={durations} onRun={run} onStop={stop} onRetryNow={retryNow} reload={reload} />
         ) : (
           <>
+            <MorningKpiStrip state={state} sectionIds={SECTION_IDS} titles={SECTION_TITLES} now={now} onJump={jumpTo} onRefresh={run} />
+
+            <SectionCard {...common("breakdown")} noView>
+              {() => (
+                <BreakdownBody
+                  result={state.results.breakdown}
+                  cfg={cfg}
+                  focusCode={driverCode}
+                  onClearFocus={() => setDriverCode(null)}
+                  onCodeClick={(code) => {
+                    setDeclineFocus(code);
+                    jumpTo("declines");
+                  }}
+                />
+              )}
+            </SectionCard>
+
+            <SectionCard {...common("declines")} noView>
+              {() => (
+                <DeclinesBody
+                  result={state.results.breakdown}
+                  amountResult={state.results.declines}
+                  focus={declineFocus}
+                  onFocus={setDeclineFocus}
+                  onCodeClick={(code) => {
+                    setDriverCode(code);
+                    jumpTo("breakdown");
+                  }}
+                />
+              )}
+            </SectionCard>
+
             <SectionCard
               {...common("sr")}
               controls={

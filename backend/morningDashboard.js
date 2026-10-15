@@ -20,12 +20,23 @@
 import fs from "fs";
 import path from "path";
 import { analyze } from "./historyInsights.js";
+import { computeAlerts, pickYday } from "../src/breakdown-math.mjs";
+import { buildSrAlertHeadline, buildSrAlertSlack } from "./srAlertMessage.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-export const SECTIONS = ["sr", "errors", "u09", "bank", "share", "flowsr", "instrument", "psp", "payerbank", "errbreak"];
+// breakdown / declines are listed first so "Refresh all" queues them first (they feed the KPI strip).
+export const SECTIONS = ["breakdown", "declines", "sr", "errors", "u09", "bank", "share", "flowsr", "instrument", "psp", "payerbank", "errbreak"];
+
+// Breakdown card tabs (Looker dimensions). Alerts are computed over all of them.
+export const BREAKDOWN_KINDS = ["psp", "bank", "instrument", "flow"];
 
 export const SECTION_META = {
+  // Impact-ranked triage: day totals per (kind, dim) over 10 days, top failure codes per dim
+  // for the last 2 days, and day-level failures per code (kind = "code", with NPCI description).
+  breakdown: { title: "SR Breakdown (impact ranked)", keys: ["ts", "kind", "dim", "code", "descr"], sums: ["total", "success"], daily: true },
+  // ₹ value of failed txns per code for the latest complete day (raw txns — Looker has no amount).
+  declines: { title: "Decline codes · ₹ amount", keys: ["ts", "code"], sums: ["cnt", "amount"], daily: true },
   sr: { title: "Success Rate", keys: ["ts", "handle", "flow"], sums: ["total", "success"] },
   errors: { title: "Error Code Analysis", keys: ["ts", "code"], sums: ["cnt"] },
   // U09 comes in short spikes — 30-min points for the 1-day view so they aren't averaged away.
@@ -72,6 +83,8 @@ const LONG_DAILY = daily({ "7d": 7, "14d": 14, "30d": 30, "60d": 60, "90d": 90, 
 const HYBRID = { ...intra(["4h", "12h", "1d"]), ...daily({ "2d": 2, "3d": 3, "7d": 7, "15d": 15 }) };
 
 export const SECTION_DURATIONS = {
+  breakdown: daily({ "10d": 10 }),
+  declines: daily({ "1d": 1 }),
   sr: ALL_INTRADAY,
   errors: ALL_INTRADAY,
   u09: ALL_INTRADAY,
@@ -92,6 +105,8 @@ const DEFAULT_CONFIG = {
   handles: ["ptyes", "ptaxis", "pthdfc", "ptsbi"],
   defaultDuration: "2d",
   sectionDurations: {
+    breakdown: "10d",
+    declines: "1d",
     sr: "4d",
     errors: "2d",
     u09: "1d",
@@ -107,20 +122,26 @@ const DEFAULT_CONFIG = {
   // "interval" = re-run when the last result is older than everyMin, only inside
   // activeHours. Scheduled runs always use the section's default duration and never
   // run on Redash (live switch DB). Opening the page never runs anything.
+  //
+  // Slots fire ~30 min before each read (07:30–08:00, 11:00, 15:30, 20:00, 23:30) so
+  // results are ready. Raw-txn sections run at all 5; day-level Looker sections only
+  // change once a day, so they run at 07:00 plus 10:30 (catches a late-loading table).
   schedule: {
     enabled: true,
-    activeHours: ["07:00", "23:00"],
+    activeHours: ["07:00", "23:30"],
     rules: {
-      sr: { type: "interval", everyMin: 60 },
-      errors: { type: "interval", everyMin: 60 },
-      u09: { type: "interval", everyMin: 30 },
-      bank: { type: "daily", at: ["08:00", "11:00"] },
-      share: { type: "daily", at: ["08:00", "11:00"] },
-      flowsr: { type: "daily", at: ["08:00", "11:00"] },
-      instrument: { type: "daily", at: ["08:00", "11:00"] },
-      psp: { type: "daily", at: ["08:00", "11:00"] },
-      payerbank: { type: "daily", at: ["08:00", "11:00"] },
-      errbreak: { type: "interval", everyMin: 60 },
+      breakdown: { type: "daily", at: ["07:00", "10:30"] },
+      declines: { type: "daily", at: ["07:00", "10:30"] },
+      sr: { type: "daily", at: ["07:00", "10:30", "15:00", "19:30", "23:00"] },
+      errors: { type: "daily", at: ["07:00", "10:30", "15:00", "19:30", "23:00"] },
+      u09: { type: "daily", at: ["07:00", "10:30", "15:00", "19:30", "23:00"] },
+      bank: { type: "daily", at: ["07:00", "10:30"] },
+      share: { type: "daily", at: ["07:00", "10:30"] },
+      flowsr: { type: "daily", at: ["07:00", "10:30"] },
+      instrument: { type: "daily", at: ["07:00", "10:30"] },
+      psp: { type: "daily", at: ["07:00", "10:30"] },
+      payerbank: { type: "daily", at: ["07:00", "10:30"] },
+      errbreak: { type: "daily", at: ["07:00", "10:30", "15:00", "19:30", "23:00"] },
     },
   },
   // Windows up to this many minutes run on Redash; longer ones on Trino.
@@ -252,7 +273,66 @@ const PAYEE_PSP_CASE = `CASE
     ELSE 'OTHERS'
   END`;
 
+// Breakdown: one Looker scan, UNION of per-kind totals, per-kind top-code rows (last 2
+// days only — the inline "top decline codes" just needs the latest day) and per-code
+// day totals with the NPCI description.
+const BD_DIMS = {
+  psp: PAYEE_PSP_CASE,
+  bank: "COALESCE(NULLIF(trim(payer_bank), ''), 'Others')",
+  instrument: "COALESCE(payer_instrument, 'Others')",
+  flow: "COALESCE(p2p_p2m_flag, 'Others')",
+};
+const BREAKDOWN_LOOKER = `WITH b AS (
+  SELECT
+    dt,
+${BREAKDOWN_KINDS.map((k) => `    ${BD_DIMS[k]} AS ${k}`).join(",\n")},
+    COALESCE(NULLIF(trim(app_resp_code), ''), '(blank)') AS code,
+    description,
+    txn_init,
+    success
+  ${LOOKER_TXNS.replace(/\n/g, "\n  ")}
+)
+${BREAKDOWN_KINDS.map(
+  (k) => `SELECT CAST(dt AS varchar) AS ts, '${k}' AS kind, ${k} AS dim, '' AS code, '' AS descr, SUM(txn_init) AS total, SUM(success) AS success
+FROM b GROUP BY dt, ${k}
+UNION ALL
+SELECT CAST(dt AS varchar) AS ts, '${k}' AS kind, ${k} AS dim, code, '' AS descr, SUM(txn_init) AS total, SUM(success) AS success
+FROM b WHERE dt >= DATE '{{TO_DATE}}' - INTERVAL '2' DAY
+GROUP BY dt, ${k}, code
+HAVING SUM(txn_init) > SUM(success)`,
+).join("\nUNION ALL\n")}
+UNION ALL
+SELECT CAST(dt AS varchar) AS ts, 'code' AS kind, code AS dim, '' AS code, COALESCE(max(description), '') AS descr, SUM(txn_init) AS total, SUM(success) AS success
+FROM b GROUP BY dt, code
+HAVING SUM(txn_init) > SUM(success)`;
+
 export const DEFAULT_SQL = {
+  breakdown: { looker: BREAKDOWN_LOOKER },
+  // Raw txns (Paytm payer handles): failed txn count and ₹ value per code, complete days.
+  declines: {
+    looker: `SELECT
+  ts,
+  code,
+  COUNT(*)    AS cnt,
+  SUM(amount) AS amount
+FROM (
+  SELECT DISTINCT
+    txn_id,
+    CAST(CAST(created_on AS date) AS varchar) AS ts,
+    COALESCE(NULLIF(trim(app_resp_code), ''), status) AS code,
+    amount
+  FROM switch.txn_info_snapshot_v3
+  WHERE dl_last_updated >= DATE '{{FROM_DATE}}'
+    AND created_on >= TIMESTAMP '{{FROM}}'
+    AND created_on <  TIMESTAMP '{{TO}}'
+    AND business_type IS NULL
+    AND type IN ('PAY', 'COLLECT')
+    AND category IN ('VPA2VPA', 'VPA2ACCOUNT', 'VPA2MERCHANT')
+    AND psp_handle IN ({{HANDLES}})
+    AND status <> 'SUCCESS'
+)
+GROUP BY 1, 2`,
+  },
   psp: {
     looker: `SELECT
   CAST(dt AS varchar) AS ts,
@@ -618,6 +698,45 @@ function mergeRows(section, rows) {
   }
   return [...map.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }
+
+// Breakdown: keep totals and code-kind rows, but only the top CODES_KEPT failure codes per
+// (day, kind, dim) — the long tail of bank × code rows is noise and bloats the cache.
+const CODES_KEPT = 5;
+function trimBreakdown(rows) {
+  const groups = new Map();
+  const out = [];
+  for (const r of rows) {
+    if (!r.code) {
+      out.push(r);
+      continue;
+    }
+    const k = `${r.ts}|${r.kind}|${r.dim}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  for (const g of groups.values()) out.push(...g.sort((a, b) => b.total - b.success - (a.total - a.success)).slice(0, CODES_KEPT));
+  return out;
+}
+
+// ─── Alerts (breakdown) ──────────────────────────────────────────────────────
+
+const KIND_LABEL = { psp: "Payee PSP", bank: "Payer bank", instrument: "Instrument", flow: "Flow" };
+const fmtAlert = (a, bankName) => {
+  const name = a.kind === "bank" && bankName(a.dim) ? `${a.dim} (${bankName(a.dim)})` : a.dim;
+  const codes = a.top.map(([c, n]) => `${c} ${Math.round(n).toLocaleString("en-IN")}`).join(", ");
+  return `${a.level} · ${KIND_LABEL[a.kind] || a.kind} ${name}: SR ${a.srNow?.toFixed(2)}% (${a.dsr >= 0 ? "+" : ""}${a.dsr?.toFixed(2)}pp vs L7D), impact ${a.impact?.toFixed(3)}pp, lost ~${Math.round(a.lost || 0).toLocaleString("en-IN")} txns${codes ? ` · top codes ${codes}` : ""}`;
+};
+
+async function postSlack(text, url = process.env.SLACK_WEBHOOK_URL || "") {
+  if (!url) return "skipped (SLACK_WEBHOOK_URL not set)";
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+    return r.ok ? "ok" : `failed (${r.status})`;
+  } catch (e) {
+    return `failed (${e.message})`;
+  }
+}
+
 
 // ─── Trino executor ──────────────────────────────────────────────────────────
 
@@ -1033,7 +1152,7 @@ WHERE dl_last_updated >= DATE '${from.slice(0, 10)}'
 
 // ─── Registration ────────────────────────────────────────────────────────────
 
-const SECTION_NUMBER = { sr: 1, errors: 2, u09: 3, bank: 4, share: 5, flowsr: 6, instrument: 7, psp: 8, payerbank: 9, errbreak: 10 };
+const SECTION_NUMBER = { breakdown: "A", declines: "B", sr: 1, errors: 2, u09: 3, bank: 4, share: 5, flowsr: 6, instrument: 7, psp: 8, payerbank: 9, errbreak: 10 };
 const durationLabel = (key) => {
   const m = /^(\d+)([mhd])$/.exec(key || "");
   if (!m) return key;
@@ -1122,7 +1241,8 @@ export function registerMorningDashboard(app, { dataDir, history: historyStore =
         rawRows = out.rows;
         if (out.sampleSql) job.sql = out.sampleSql;
       }
-      const rows = mergeRows(section, rawRows);
+      const merged = mergeRows(section, rawRows);
+      const rows = section === "breakdown" ? trimBreakdown(merged) : merged;
       const finishedAt = Date.now();
       results[section] = {
         section,
@@ -1148,7 +1268,10 @@ export function registerMorningDashboard(app, { dataDir, history: historyStore =
         attempt: job.attempt,
         elapsedMs: job.elapsedMs,
         rowCount: rows.length,
-        analysis: analyze("morning", section, rows, { bucketMin: job.window.bucketMin, errorColumn: config.errorColumn }),
+        analysis:
+          section === "breakdown"
+            ? await breakdownAlerts(rows, job.trigger)
+            : analyze("morning", section, rows, { bucketMin: job.window.bucketMin, errorColumn: config.errorColumn }),
       });
     } catch (err) {
       const finishedAt = Date.now();
@@ -1177,6 +1300,51 @@ export function registerMorningDashboard(app, { dataDir, history: historyStore =
       console.warn(`[mdash] ${section} ${job.engine} attempt ${job.attempt} ${job.status}: ${message}`);
     } finally {
       job.controller = null;
+    }
+  }
+
+  /**
+   * WARN / CRIT rows → History alert log (deduped per data day) and Slack (new CRITs only).
+   * Returns the History "analysis" block for this breakdown run.
+   */
+  async function breakdownAlerts(rows, trigger) {
+    try {
+      const yday = pickYday(rows, { kind: "bank" });
+      if (!yday) return null;
+      const alerts = computeAlerts(rows, { kinds: BREAKDOWN_KINDS, yday });
+      const bankName = (code) => config.remitterBanks?.find((b) => b.code === code)?.name || null;
+      const fresh = historyStore?.recordAlerts?.({ dashboard: "morning", dataDay: yday, trigger, alerts }) || [];
+      // Slack (title line + detail blocks; the full headline goes to History):
+      //  • Daily digest: once per data day, all WARN / CRIT rows, sent by the first run that sees
+      //    a complete day with alerts. A failed send releases the claim so the next run retries.
+      //  • CRIT exemption: a CRIT first logged after that day's digest went out is posted
+      //    immediately on its own (the digest already covers CRITs present when it is sent).
+      const slack = [];
+      if (alerts.length && historyStore?.claimDigest?.(yday, { alerts: alerts.length, trigger })) {
+        const r = await postSlack(buildSrAlertSlack(alerts, { day: yday, bankName }));
+        if (r === "ok") historyStore.finishDigest(yday, { sentAt: Date.now(), result: r });
+        else historyStore.releaseDigest(yday);
+        slack.push(`daily digest (${alerts.length}): ${r}`);
+      } else {
+        const lateCrit = fresh.filter((a) => a.level === "CRIT");
+        if (lateCrit.length) {
+          const r = await postSlack(buildSrAlertSlack(lateCrit, { day: yday, bankName }));
+          slack.push(`CRIT (${lateCrit.length}): ${r}`);
+        }
+      }
+      if (slack.length) console.log(`[mdash] slack SR alerts ${yday}: ${slack.join("; ")}`);
+      // History: Minto headline (title + governing thought); per-row lines as standouts.
+      const head = alerts.length ? buildSrAlertHeadline(alerts, { day: yday, bankName }) : null;
+      return {
+        summary: head ? `${head.title} — ${head.text}` : `No WARN / CRIT rows for ${yday}.`,
+        standouts: alerts.map((a) => fmtAlert(a, bankName)),
+        actions: slack.map((x) => `Slack ${x}`),
+        nextSteps: [],
+        tables: [],
+      };
+    } catch (err) {
+      console.warn("[mdash] breakdown alerts failed:", err.message);
+      return { summary: `Alert computation failed: ${err.message}`, standouts: [], actions: [], nextSteps: [], tables: [] };
     }
   }
 

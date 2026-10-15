@@ -257,6 +257,103 @@ function Detail({ id, onRerun }) {
   );
 }
 
+// ─── SR alerts per day (Morning Dashboard breakdown WARN / CRIT rows) ─────────
+
+const KIND_LABEL = { psp: "PSP", bank: "Bank", instrument: "Instrument", flow: "Flow" };
+const LEVEL = { CRIT: { color: "#ef4444", fg: "#fff" }, WARN: { color: "#fab219", fg: "#2a1a00" } };
+
+function AlertsPanel({ dashboard, from, to, active }) {
+  const [alerts, setAlerts] = useState(null);
+  const [err, setErr] = useState(null);
+  const [open, setOpen] = useState(null);
+  useEffect(() => {
+    if (!active) return;
+    api(`/alerts?dashboard=${dashboard}&from=${from}&to=${to}`)
+      .then((d) => {
+        setAlerts(d.alerts || []);
+        setErr(null);
+      })
+      .catch((e) => setErr(e.message));
+  }, [dashboard, from, to, active]);
+
+  const byDay = useMemo(() => {
+    const m = new Map();
+    for (const a of alerts || []) {
+      if (!m.has(a.dataDay)) m.set(a.dataDay, []);
+      m.get(a.dataDay).push(a);
+    }
+    return [...m.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }, [alerts]);
+
+  if (dashboard !== "all" && dashboard !== "morning") return null;
+  return (
+    <section style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, margin: "16px 16px 0", maxWidth: 1500 - 32, marginInline: "auto" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline", marginBottom: byDay.length ? 10 : 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>🚨 SR alerts per day</span>
+        <span style={{ fontSize: 11, color: C.muted }}>
+          Morning Dashboard breakdown · data day {from} → {to} · WARN: Δ SR ≤ −1pp & impact ≤ −0.1pp · CRIT: ≤ −3pp & ≤ −0.3pp (CRIT also posted to Slack)
+        </span>
+      </div>
+      {err && <div style={{ color: "#fecaca", fontSize: 12 }}>{err}</div>}
+      {alerts && !byDay.length && <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>No alerts in this range.</div>}
+      {byDay.map(([day, list]) => {
+        const crit = list.filter((a) => a.level === "CRIT").length;
+        const isOpen = open === day;
+        return (
+          <div key={day} style={{ borderTop: `1px solid ${C.border}`, padding: "6px 0" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", cursor: "pointer", fontSize: 12 }} onClick={() => setOpen(isOpen ? null : day)}>
+              <span style={{ width: 12, color: C.muted }}>{isOpen ? "▾" : "▸"}</span>
+              <b style={{ color: C.text, minWidth: 86 }}>{day}</b>
+              <span style={{ color: crit ? LEVEL.CRIT.color : C.muted, fontWeight: 600 }}>{crit} CRIT</span>
+              <span style={{ color: list.length - crit ? LEVEL.WARN.color : C.muted, fontWeight: 600 }}>{list.length - crit} WARN</span>
+              <span style={{ color: C.text2 }}>
+                {list
+                  .slice(0, 4)
+                  .map((a) => `${KIND_LABEL[a.kind] || a.kind} ${a.dim} ${a.dsr?.toFixed(2)}pp`)
+                  .join(" · ")}
+                {list.length > 4 ? ` · +${list.length - 4} more` : ""}
+              </span>
+            </div>
+            {isOpen && (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginTop: 6 }}>
+                <thead>
+                  <tr>
+                    {["", "Dimension", "SR now", "Δ vs L7D", "Impact", "Lost txns", "Top codes", "Logged"].map((h) => (
+                      <th key={h} style={{ textAlign: "left", color: C.text2, padding: "4px 8px", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {list.map((a) => (
+                    <tr key={`${a.kind}|${a.dim}|${a.level}`} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td style={{ padding: "4px 8px" }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4, background: LEVEL[a.level]?.color, color: LEVEL[a.level]?.fg }}>{a.level}</span>
+                      </td>
+                      <td style={{ padding: "4px 8px", color: C.text, fontWeight: 600 }}>
+                        {KIND_LABEL[a.kind] || a.kind} · {a.dim}
+                      </td>
+                      <td style={{ padding: "4px 8px" }}>{a.srNow?.toFixed(2)}%</td>
+                      <td style={{ padding: "4px 8px", color: "#ef4444" }}>{a.dsr?.toFixed(2)}pp</td>
+                      <td style={{ padding: "4px 8px", color: "#ef4444" }}>{a.impact?.toFixed(3)}pp</td>
+                      <td style={{ padding: "4px 8px" }}>{Math.round(a.lost || 0).toLocaleString("en-IN")}</td>
+                      <td style={{ padding: "4px 8px", color: C.text2 }}>{(a.top || []).map(([c, n]) => `${c} ${Math.round(n).toLocaleString("en-IN")}`).join(" · ")}</td>
+                      <td style={{ padding: "4px 8px", color: C.muted, whiteSpace: "nowrap" }}>
+                        {fmtStamp(a.at)} · {a.trigger === "schedule" ? "Auto" : "Manual"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 export default function DashboardHistory({ active = true }) {
   const [dashboard, setDashboard] = useState(dashboardFromHash);
   const [from, setFrom] = useState(() => istDay(-2));
@@ -338,6 +435,8 @@ export default function DashboardHistory({ active = true }) {
           </button>
         </div>
       </header>
+
+      <AlertsPanel dashboard={dashboard} from={from} to={to} active={active} />
 
       <main style={{ padding: 16, maxWidth: 1500, margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 460px), 1fr))", gap: 16, alignItems: "start" }}>
         <section style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, minWidth: 0 }}>

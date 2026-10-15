@@ -17,9 +17,9 @@ import { runTrino } from "./morningDashboard.js";
 import { analyze } from "./historyInsights.js";
 
 // History tab labels per section.
-const SNIPPET_TITLES = { psp: "P2M Payee PSP SR", errors: "P2M Error codes", instrument: "P2M Instrument SR" };
+const SNIPPET_TITLES = { breakdown: "P2M SR Breakdown", psp: "P2M Payee PSP SR", errors: "P2M Error codes", instrument: "P2M Instrument SR" };
 
-export const SNIPPET_SECTIONS = ["psp", "errors", "instrument"];
+export const SNIPPET_SECTIONS = ["breakdown", "psp", "errors", "instrument"];
 
 const HANDLES = ["ptyes", "ptaxis", "ptsbi", "pthdfc"];
 const TZ_OFFSET_MIN = 330;
@@ -42,7 +42,41 @@ WHERE dt >= DATE '{{FROM_DATE}}'
   AND p2p_p2m_flag = 'P2M'
   AND lower(payer_handle) IN ({{HANDLES}})`;
 
+// Breakdown (triage table): day totals per (handle, kind, dim) over the last
+// BREAKDOWN_DAYS days, plus per-failure-code rows for the last CODE_DAYS days only
+// (inline "top decline codes" just needs the latest day). code = '' marks a total row.
+const BREAKDOWN_DAYS = 10;
+const CODE_DAYS = 2;
+const BREAKDOWN_KINDS = [
+  ["psp", PAYEE_PSP_CASE],
+  ["bank", "COALESCE(NULLIF(trim(payer_bank), ''), 'Others')"],
+  ["instrument", "COALESCE(payer_instrument, 'Others')"],
+];
+const BREAKDOWN_SQL = `WITH b AS (
+  SELECT
+    dt,
+    lower(payer_handle) AS handle,
+${BREAKDOWN_KINDS.map(([k, expr]) => `    ${expr} AS ${k}`).join(",\n")},
+    COALESCE(NULLIF(trim(app_resp_code), ''), '(blank)') AS code,
+    txn_init,
+    success
+  FROM team_product.LOOKER_TPAP_Txns_V3
+  WHERE dt >= DATE '{{BD_FROM}}'
+    AND dt <  DATE '{{TO_DATE}}'
+    AND p2p_p2m_flag = 'P2M'
+    AND lower(payer_handle) IN ({{HANDLES}})
+)
+${BREAKDOWN_KINDS.map(
+  ([k]) => `SELECT CAST(dt AS varchar) AS ts, handle, '${k}' AS kind, ${k} AS dim, '' AS code, SUM(txn_init) AS total, SUM(success) AS success
+FROM b GROUP BY dt, handle, ${k}
+UNION ALL
+SELECT CAST(dt AS varchar) AS ts, handle, '${k}' AS kind, ${k} AS dim, code, SUM(txn_init) AS total, SUM(success) AS success
+FROM b WHERE dt >= DATE '{{CODE_FROM}}' GROUP BY dt, handle, ${k}, code
+HAVING SUM(txn_init) > SUM(success)`,
+).join("\nUNION ALL\n")}`;
+
 export const SNIPPET_SQL = {
+  breakdown: BREAKDOWN_SQL,
   psp: `SELECT
   CAST(dt AS varchar)  AS ts,
   lower(payer_handle)  AS handle,
@@ -86,14 +120,37 @@ export function snippetWindow(nowMs = Date.now()) {
   return { fromDate: ymd(new Date(from)), toDate: ymd(new Date(today)) };
 }
 
+const minusDays = (day, n) => ymd(new Date(Date.parse(`${day}T00:00:00Z`) - n * 86400000));
+
 function renderSql(section, win) {
   return SNIPPET_SQL[section]
+    .replaceAll("{{BD_FROM}}", minusDays(win.toDate, BREAKDOWN_DAYS))
+    .replaceAll("{{CODE_FROM}}", minusDays(win.toDate, CODE_DAYS))
     .replaceAll("{{FROM_DATE}}", win.fromDate)
     .replaceAll("{{TO_DATE}}", win.toDate)
     .replaceAll("{{HANDLES}}", HANDLES.map((h) => `'${h}'`).join(", "));
 }
 
 const num = (v) => (v == null ? 0 : Number(v) || 0);
+
+// Breakdown: keep total rows, and only the top CODES_KEPT failure codes per
+// (day, handle, kind, dim) — the long tail is noise and bloats the cache.
+const CODES_KEPT = 5;
+function trimBreakdown(rows) {
+  const groups = new Map();
+  const out = [];
+  for (const r of rows) {
+    if (!r.code) {
+      out.push(r);
+      continue;
+    }
+    const k = `${r.ts}|${r.handle}|${r.kind}|${r.dim}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  for (const g of groups.values()) out.push(...g.sort((a, b) => b.total - b.success - (a.total - a.success)).slice(0, CODES_KEPT));
+  return out;
+}
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
@@ -146,13 +203,15 @@ export function registerSrSnippet(app, { dataDir, history = null }) {
     );
     try {
       const raw = await runTrino(sql, { timeoutMs: TIMEOUT_MS });
-      const rows = raw.map((r) => ({
+      const mapped = raw.map((r) => ({
         ts: String(r.ts).slice(0, 10),
         handle: r.handle,
+        ...(r.kind != null && { kind: r.kind, code: r.code || "" }),
         dim: r.dim,
         total: num(r.total),
         success: num(r.success),
       }));
+      const rows = section === "breakdown" ? trimBreakdown(mapped) : mapped;
       const finishedAt = Date.now();
       cache[section] = { rows, window: win, finishedAt, durationMs: finishedAt - startedAt };
       writeJsonFile(cacheFile, cache);
@@ -227,7 +286,7 @@ export function registerSrSnippet(app, { dataDir, history = null }) {
     }),
   );
 
-  // Used by the History tab's Re-run (the snippet always refreshes all three sections).
+  // Used by the History tab's Re-run (the snippet always refreshes all sections).
   return {
     rerun() {
       if (running) return { started: "Already running — results will update shortly" };

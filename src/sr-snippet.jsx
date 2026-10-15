@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import BreakdownTable from "./breakdown-table.jsx";
 
 // Success Rate Snippet — P2M day-level snapshot for Paytm TPAP payer handles
 // (PTYES, PTAXIS, PTSBI, PTHDFC). Mirrors Superset dashboard 575.
@@ -352,7 +353,7 @@ export default function SrSnippet() {
   // Y = latest day present in the data (Looker table can lag a day).
   const yday = useMemo(() => {
     let max = "";
-    for (const s of ["psp", "instrument", "errors"]) for (const r of cache[s]?.rows || []) if (r.ts > max) max = r.ts;
+    for (const s of ["breakdown", "psp", "instrument", "errors"]) for (const r of cache[s]?.rows || []) if (r.ts > max) max = r.ts;
     return max || null;
   }, [cache]);
   const P = useMemo(() => (yday ? periods(yday) : null), [yday]);
@@ -474,8 +475,30 @@ export default function SrSnippet() {
         </div>
       )}
 
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, marginBottom: 16, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>1 · P2M SR Breakdown — impact ranked</div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>
+              Yesterday vs D-1/D-2/D-3, same weekday last week and L7D average, by payee PSP / payer bank / payer instrument. Rows sorted by
+              contribution to the overall SR change; WARN/CRIT when the SR drop and its impact both cross threshold.
+            </div>
+          </div>
+          {jobs.breakdown?.status === "error" && <span style={{ fontSize: 11, color: C.bad }}>last run failed</span>}
+          <JobBadge job={jobs.breakdown} cached={cache.breakdown} />
+          <button type="button" onClick={() => showSql("breakdown")} style={btn(false)}>
+            SQL
+          </button>
+        </div>
+        {jobs.breakdown?.status === "running" && !cache.breakdown ? (
+          <div style={{ padding: 24, color: C.muted, fontSize: 13, textAlign: "center" }}>Running on Trino…</div>
+        ) : (
+          <BreakdownTable rows={cache.breakdown?.rows || []} yday={cache.breakdown?.rows?.length ? yday : null} handleSel={handleSel} fileTag="sr-breakdown" />
+        )}
+      </div>
+
       <Section
-        n={1}
+        n={2}
         title="P2M Payee PSP Wise SR%"
         desc="SR% for P2M where payer is a Paytm TPAP handle, by payee PSP: PhonePe (ybl, axl, ibl), Google Pay (okbizaxis, okbizicici, okpayaxis), Paytm (pty, ptybl, ptys, paytm), Others."
         job={jobs.psp}
@@ -486,7 +509,7 @@ export default function SrSnippet() {
         onShowSql={() => showSql("psp")}
       />
       <Section
-        n={2}
+        n={3}
         title={`P2M Top ${ERROR_TOP_N} Errors And Contribution %`}
         desc="Top error codes (app_resp_code) by yesterday's failures and their share of all failures — which codes increased / decreased."
         job={jobs.errors}
@@ -497,9 +520,9 @@ export default function SrSnippet() {
         onShowSql={() => showSql("errors")}
       />
       <Section
-        n={3}
+        n={4}
         title="P2M Payee PSP Wise Success Txns"
-        desc="Successful P2M txn count by payee PSP (same PSP grouping as section 1)."
+        desc="Successful P2M txn count by payee PSP (same PSP grouping as section 2)."
         job={jobs.psp}
         cached={cache.psp}
         firstCol="PSP"
@@ -508,7 +531,7 @@ export default function SrSnippet() {
         onShowSql={() => showSql("psp")}
       />
       <Section
-        n={4}
+        n={5}
         title="P2M Payer Instrument Wise SR%"
         desc="SR% by payer instrument for P2M — payer-side health. Sorted by MTD volume."
         job={jobs.instrument}

@@ -233,7 +233,84 @@ export function createHistoryStore({ rootDir }) {
     if (n) console.log(`[history] closed ${n} unfinished run(s) from before the restart`);
   })();
 
-  return { start, update, list, get, rootDir };
+  // ── SR alerts (WARN / CRIT rows from the Morning Dashboard breakdown) ──
+  // YYYY-MM-DD/alerts.jsonl, keyed by the *data* day. One line per (dashboard, kind, dim,
+  // level) per data day — re-runs of the same day don't duplicate, an escalation does.
+  const alertKey = (a) => `${a.dashboard}|${a.dataDay}|${a.kind}|${a.dim}|${a.level}`;
+  function readAlerts(day) {
+    try {
+      return fs
+        .readFileSync(path.join(dayDir(day), "alerts.jsonl"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => {
+          try {
+            return JSON.parse(l);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Append alerts not yet logged for this data day; returns the newly logged ones. */
+  function recordAlerts({ dashboard, dataDay, trigger, alerts }) {
+    if (!DATE_RE.test(dataDay) || !alerts?.length) return [];
+    const seen = new Set(readAlerts(dataDay).map(alertKey));
+    const at = Date.now();
+    const fresh = alerts.map((a) => ({ ...a, dashboard, dataDay, trigger, at })).filter((a) => !seen.has(alertKey(a)));
+    if (!fresh.length) return [];
+    try {
+      fs.mkdirSync(dayDir(dataDay), { recursive: true });
+      fs.appendFileSync(path.join(dayDir(dataDay), "alerts.jsonl"), fresh.map((a) => `${JSON.stringify(a)}\n`).join(""));
+    } catch (err) {
+      console.warn(`[history] could not write alerts for ${dataDay}: ${err.message}`);
+    }
+    return fresh;
+  }
+
+  function listAlerts({ from, to, dashboard }) {
+    const out = [];
+    for (let t = Date.parse(`${from}T00:00:00Z`); t <= Date.parse(`${to}T00:00:00Z`); t += 86400000) {
+      const day = new Date(t).toISOString().slice(0, 10);
+      for (const a of readAlerts(day)) if (!dashboard || dashboard === "all" || a.dashboard === dashboard) out.push(a);
+    }
+    return out.sort((a, b) => (a.dataDay === b.dataDay ? a.impact - b.impact : a.dataDay < b.dataDay ? 1 : -1));
+  }
+
+  // Once-a-day Slack digest per data day: YYYY-MM-DD/alert-digest.json marks it sent.
+  // claim() is atomic (exclusive create); release() undoes a claim whose send failed.
+  const digestFile = (day) => path.join(dayDir(day), "alert-digest.json");
+  function claimDigest(dataDay, meta = {}) {
+    if (!DATE_RE.test(dataDay)) return false;
+    try {
+      fs.mkdirSync(dayDir(dataDay), { recursive: true });
+      fs.writeFileSync(digestFile(dataDay), JSON.stringify({ ...meta, claimedAt: Date.now() }), { flag: "wx" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function releaseDigest(dataDay) {
+    try {
+      fs.unlinkSync(digestFile(dataDay));
+    } catch {
+      /* already gone */
+    }
+  }
+  function finishDigest(dataDay, patch) {
+    try {
+      const cur = JSON.parse(fs.readFileSync(digestFile(dataDay), "utf8"));
+      fs.writeFileSync(digestFile(dataDay), JSON.stringify({ ...cur, ...patch }));
+    } catch {
+      /* best effort */
+    }
+  }
+
+  return { start, update, list, get, rootDir, recordAlerts, listAlerts, claimDigest, releaseDigest, finishDigest };
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -260,6 +337,19 @@ export function registerHistory(app, { history, rerun }) {
       if ((Date.parse(to) - Date.parse(from)) / 86400000 > 92) throw new Error("Pick a range of 92 days or less");
       const dashboard = String(req.query.dashboard || "all");
       return { from, to, dashboard, dashboards: DASHBOARDS, root: history.rootDir, items: history.list({ dashboard, from, to }) };
+    })
+  );
+
+  app.get(
+    "/api/history/alerts",
+    handle((req) => {
+      const to = String(req.query.to || today());
+      const from = String(req.query.from || shift(to, -6));
+      if (!DATE_RE.test(from) || !DATE_RE.test(to)) throw new Error("from / to must be YYYY-MM-DD");
+      if (from > to) throw new Error("Start date is after end date");
+      if ((Date.parse(to) - Date.parse(from)) / 86400000 > 92) throw new Error("Pick a range of 92 days or less");
+      const dashboard = String(req.query.dashboard || "all");
+      return { from, to, dashboard, alerts: history.listAlerts({ from, to, dashboard }) };
     })
   );
 

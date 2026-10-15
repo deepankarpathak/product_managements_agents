@@ -49,10 +49,13 @@
 backend/node_modules
 backend/data
 backend/agent-exports
-
+backend/.tmp_*.mjs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+#Aplha frotend
+alpha-web-ui/tsconfig.tsbuildinfo
 
 #selected pages
 pdfParser copy.js
