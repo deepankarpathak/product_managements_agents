@@ -1,20 +1,13 @@
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { REPO_ROOT } from "@/lib/repo";
 
-function getAnthropicToken(): string {
-  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
-  try {
-    const raw = execSync(
-      "security find-generic-password -s 'Claude Code-credentials' -w",
-      { encoding: "utf8", timeout: 3000 }
-    ).trim();
-    const d = JSON.parse(raw);
-    return d?.claudeAiOauth?.accessToken ?? "";
-  } catch {
-    return "";
-  }
-}
+// Auth: the spawned `claude` CLI resolves credentials itself, in order:
+// ANTHROPIC_API_KEY → CLAUDE_CODE_OAUTH_TOKEN (long-lived, from
+// `claude setup-token`) → its own Keychain login, which it refreshes.
+// Do NOT copy the Keychain access token into the env: that snapshot expires
+// within hours and the child has no refresh token, causing
+// "OAuth session expired and could not be refreshed".
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -151,10 +144,9 @@ export async function POST(req: Request) {
     args.push("--session-id", sessionId);
   }
 
-  const token = getAnthropicToken();
   const child = spawn("claude", args, {
     cwd: REPO_ROOT,
-    env: { ...process.env, ...(token ? { ANTHROPIC_API_KEY: token } : {}) },
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
