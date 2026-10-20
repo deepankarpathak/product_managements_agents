@@ -22,7 +22,7 @@ const ID_RE = /^\d{8}-\d{6}-[a-z]+-[a-z0-9]+-[a-z0-9]{4}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export const DASHBOARDS = {
-  morning: "Morning Dashboard",
+  morning: "Morning Dashboard (retired)",
   srsnippet: "Success Rate Snippet",
   product: "Product Wise",
   unified: "Unified SR Dashboard",

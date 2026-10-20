@@ -18,7 +18,6 @@ import { extractTextFromPDF, extractTextFromPDFBuffer } from "./pdfParser.js";
 import FormData from "form-data";
 import { retrieve as ragRetrieve } from "./rag/retrieve.js";
 import { buildDocsKnowledgeContext } from "./docsKnowledge.js";
-import { registerMorningDashboard } from "./morningDashboard.js";
 import { registerSrSnippet } from "./srSnippet.js";
 import { registerUnifiedDashboard } from "./unifiedDashboard.js";
 import { registerUnifiedDrill } from "./unifiedDrill.js";
@@ -3203,17 +3202,14 @@ app.post("/api/notify/analyst", async (req, res) => {
   }
 });
 
-// Dashboard History — every Morning Dashboard / SR Snippet run (manual + scheduled) is
+// Dashboard History — every Unified SR / SR Snippet / Product run (manual + scheduled) is
 // saved as Markdown under Query_Agent/AnaylsisAgent_output/history — /api/history/*
 const dashboardHistory = createHistoryStore({ rootDir: path.join(__dirname, "..", "Query_Agent", "AnaylsisAgent_output", "history") });
-
-// Morning Dashboard (SR / errors / U09 / bank) — /api/mdash/*
-const morningDashboard = registerMorningDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
 
 // Success Rate Snippet (P2M PSP / errors / instrument, D-1 vs L7D / MTD vs LMTD) — /api/srsnippet/*
 const srSnippet = registerSrSnippet(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
 
-// Unified SR Dashboard (Morning Dashboard + SR Snippet merged; runs alongside both for evaluation) — /api/udash/*
+// Unified SR Dashboard (Morning Dashboard + SR Snippet merged; replaces the retired Morning Dashboard) — /api/udash/*
 const unifiedDashboard = registerUnifiedDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
 registerUnifiedDrill(app, { dataDir: path.join(__dirname, "data") });
 
@@ -3222,7 +3218,6 @@ const productDashboard = registerProductDashboard(app, { dataDir: path.join(__di
 registerHistory(app, {
   history: dashboardHistory,
   rerun: {
-    morning: (rec) => morningDashboard.rerun(rec.rerun || {}),
     srsnippet: () => srSnippet.rerun(),
     unified: (rec) => unifiedDashboard.rerun(rec.rerun || {}),
     product: (rec) => productDashboard.rerun(rec.rerun || {}),
@@ -3234,7 +3229,8 @@ registerUtilities(app);
 const buildPath = path.join(__dirname, "..", "build");
 if (NODE_ENV === "production" && fs.existsSync(buildPath)) {
   app.use(express.static(buildPath));
-  app.get("*", (req, res, next) => {
+  // Express 5 (path-to-regexp v8) rejects a bare "*"; a named wildcard matches every path.
+  app.get("/{*splat}", (req, res, next) => {
     if (req.path.startsWith("/api")) return next();
     res.sendFile(path.join(buildPath, "index.html"));
   });

@@ -1,5 +1,5 @@
 // Breakdown math — pure functions shared by the browser (breakdown-table.jsx,
-// morning-breakdown.jsx) and the backend (morningDashboard.js computes alerts
+// sr-shared.jsx) and the backend (unifiedDashboard.js computes alerts
 // for History / Slack with the exact same rules). No imports, no JSX.
 //
 // Input rows: { ts, handle?, kind, dim, code, descr?, total, success }

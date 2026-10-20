@@ -407,7 +407,7 @@ export default function DashboardHistory({ active = true }) {
             Dashboard
             <select style={input} value={dashboard} onChange={(e) => setDashboard(e.target.value)}>
               <option value="all">All dashboards</option>
-              <option value="morning">Morning Dashboard</option>
+              <option value="morning">Morning Dashboard (retired)</option>
               <option value="unified">Unified SR Dashboard</option>
               <option value="srsnippet">Success Rate Snippet</option>
               <option value="product">Product Wise</option>

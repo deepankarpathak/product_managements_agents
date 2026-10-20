@@ -1,6 +1,6 @@
 // Shared Trino (DWH) and Redash clients for every dashboard backend: Unified SR, Success Rate
-// Snippet, Product Wise, Utilities, the UPI Plugin funnel and (until it is retired) the Morning
-// Dashboard. Moved out of morningDashboard.js unchanged.
+// Snippet, Product Wise, Utilities and the UPI Plugin funnel. Moved out of the retired Morning
+// Dashboard (morningDashboard.js) unchanged.
 //
 // runTrino: one Trino service account is shared by every dashboard, the Utilities tab and the
 // Analyst Agent, so all callers in this process go through one concurrency cap

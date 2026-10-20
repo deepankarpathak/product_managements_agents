@@ -2,8 +2,8 @@ import { Fragment, useMemo, useState } from "react";
 import BreakdownTable from "./breakdown-table.jsx";
 import { ALERT_RULES, buildBreakdown, buildDeclines, computeAlerts, pickYday } from "./breakdown-math.mjs";
 
-// Shared SR dashboard pieces built on the breakdown section (Unified SR Dashboard; the Morning
-// Dashboard re-exports them from morning-breakdown.jsx until it is retired):
+// Shared SR dashboard pieces built on the breakdown section (Unified SR Dashboard; moved here
+// from the retired Morning Dashboard):
 //   SrKpiStrip / MorningKpiStrip  overall SR / Δ vs L7D / rate-vs-mix / lost txns / alerts + refresh status
 //   BreakdownBody                 impact-ranked BreakdownTable (PSP / bank / instrument / flow)
 //   DeclinesBody                  decline codes: NPCI description, ₹ amount, share, D-1..D-3, LW, Δ %
@@ -383,7 +383,7 @@ export function BreakdownBody({ result, cfg, focusCode, onCodeClick, onClearFocu
         kinds={MORNING_KINDS}
         showKpis={false}
         labelOf={labelOf}
-        fileTag="morning-breakdown"
+        fileTag="sr-breakdown"
         onCodeClick={onCodeClick}
         focusCode={focusCode}
         onClearFocus={onClearFocus}

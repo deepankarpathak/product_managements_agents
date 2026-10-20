@@ -1,6 +1,6 @@
 // Unified SR Dashboard — Morning Dashboard + Success Rate Snippet merged into one page.
 //
-// Same engine as morningDashboard.js (one query per section, Trino / Redash, retry queue,
+// Same engine as the retired Morning Dashboard (one query per section, Trino / Redash, retry queue,
 // backend refresh schedule, results cached on disk), with merged sections:
 //   breakdown  A  impact-ranked SR breakdown (Looker, 10d) — per payer handle × flow
 //   declines   B  ₹ value of failed txns per code (raw txns, latest complete day)
@@ -130,7 +130,7 @@ const DEFAULT_CONFIG = {
     bankx: "10d",
     share: "7d",
   },
-  // Backend refresh schedule (IST) — see morningDashboard.js. recheck slots run only when the
+  // Backend refresh schedule (IST). recheck slots run only when the
   // last result is missing yesterday or yesterday's volume is < 70% of the prior-week median.
   schedule: {
     enabled: true,
@@ -220,7 +220,7 @@ const DEFAULT_CONFIG = {
 };
 
 // ─── SQL templates ───────────────────────────────────────────────────────────
-// Placeholders as in morningDashboard.js. Every section returns raw integer counts.
+// Placeholders as in the retired Morning Dashboard. Every section returns raw integer counts.
 
 const TRINO_T = `WITH t AS (
   SELECT txn_id, created_on, status, app_resp_code, npci_resp_code, psp_handle AS handle, category AS cat,
@@ -934,7 +934,7 @@ export function mergeRows(section, rows) {
 
 // Breakdown: keep totals and code-kind rows, but only the top CODES_KEPT failure codes per
 // (day, kind, dim) — the long tail of bank × code rows is noise and bloats the cache.
-// Runs per view (after handle / flow are aggregated away), exactly as in morningDashboard.js.
+// Runs per view (after handle / flow are aggregated away), exactly as in the retired Morning Dashboard.
 const CODES_KEPT = 5;
 const CODES_GLOBAL = 20;
 export function trimBreakdown(rows) {

@@ -58,7 +58,6 @@ Success-rate dashboards share the same backend and UI. They query the DWH (Trino
 |---|---|---|---|
 | **Unified SR (beta)** | `#srdash` | Merged Morning + Snippet view: sections A–K | `src/sr-unified-dashboard.jsx`, `backend/unifiedDashboard.js` |
 | Success Rate Snippet | `#srsnippet` | P2M SR snapshot for the 4 TPAP handles | `src/sr-snippet.jsx`, `backend/srSnippet.js` |
-| ☀ Morning Dashboard | `#morning` | Legacy, being replaced by Unified SR; kept until retired | `src/morning-dashboard.jsx`, `backend/morningDashboard.js` |
 
 Unified SR sections:
 
@@ -84,11 +83,13 @@ Shared modules:
 | `backend/unifiedDrill.js` | `/api/udash/drill/*`: on-demand drill-down, samples, durations |
 | `backend/bankReport.js` | Bank report split, error spikes, intraday bank alerts |
 | `backend/srAlertMessage.js` | Slack SR alert / daily digest text |
-| `src/sr-shared.jsx` | KPI strip, declines table and breakdown views shared by the SR tabs (`morning-breakdown.jsx` re-exports it) |
+| `src/sr-shared.jsx` | KPI strip, declines table and breakdown views shared by the SR tabs |
 | `src/bank-health.mjs` | Bank health v2: shift-share contribution, z-score vs the bank's own σ, 2-day persistence |
 | `src/escalation.mjs`, `src/unified-psp.mjs`, `src/unified-scorecard.jsx`, `src/breakdown-*.{mjs,jsx}` | Escalation scoring, PSP mapping, scorecards, breakdown tables |
 
-API: `/api/udash/*` (state, run, config, annotations, drill), `/api/srsnippet/*`, `/api/mdash/*` (legacy), `/api/history/*`. Every run is saved to Dashboard History.
+API: `/api/udash/*` (state, run, config, annotations, drill), `/api/srsnippet/*`, `/api/history/*`. Every run is saved to Dashboard History.
+
+The ☀ Morning Dashboard is retired: Unified SR replaces it, and `#morning` bookmarks open Unified SR. Old Morning runs stay readable in History but can't be re-run. `MDASH_*` env names are still read by `trinoClient.js`.
 
 Relevant env (values in `.env` only): `TRINO_API_URL`, `TRINO_SERVICE_USER`, `TRINO_SERVICE_PASSWORD`, `TRINO_CATALOG`, `TRINO_SCHEMA`, `TRINO_SOURCE`, `TRINO_EXECUTE_AS_USER`, `TRINO_IMPERSONATION`, `MDASH_TRINO_MAX_CONCURRENT` (default 3), `PTYES_REDASH_URL` / `PTYES_REDASH_API_KEY` (or `MDASH_REDASH_*` / `REDASH_*`), `SLACK_WEBHOOK_URL`.
 
