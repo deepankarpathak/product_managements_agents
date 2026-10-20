@@ -154,7 +154,7 @@ AWS_REGION=ap-south-1
 **Jira**
 ```
 JIRA_URL=https://yourcompany.atlassian.net
-JIRA_URL_2=https://mypaytm.atlassian.net        # secondary site
+JIRA_URL_2=https://secondary-site.atlassian.net       # secondary site
 JIRA_SECONDARY_PROJECT_KEYS=TPAP,PCO,TPG        # routed to JIRA_URL_2
 JIRA_EMAIL=you@company.com
 JIRA_TOKEN=...
@@ -181,7 +181,7 @@ EMAIL_PASS=...
 
 **Analyst Agent**
 ```
-TRINO_API_URL=https://cdp-trino-query.platform.mypaytm.com/
+TRINO_API_URL=https://trino.example.com/
 TRINO_SERVICE_USER=service@company.com
 TRINO_SERVICE_PASSWORD=...
 TRINO_CATALOG=hive
