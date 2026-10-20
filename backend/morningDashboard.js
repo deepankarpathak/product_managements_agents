@@ -273,9 +273,9 @@ const PAYEE_PSP_CASE = `CASE
     ELSE 'OTHERS'
   END`;
 
-// Breakdown: one Looker scan, UNION of per-kind totals, per-kind top-code rows (last 2
-// days only — the inline "top decline codes" just needs the latest day) and per-code
-// day totals with the NPCI description.
+// Breakdown: one Looker scan, UNION of per-kind totals, per-kind code rows (whole window:
+// top decline codes for the latest day + per-code trend lines) and per-code day totals
+// with the NPCI description.
 const BD_DIMS = {
   psp: PAYEE_PSP_CASE,
   bank: "COALESCE(NULLIF(trim(payer_bank), ''), 'Others')",
@@ -297,8 +297,7 @@ ${BREAKDOWN_KINDS.map(
 FROM b GROUP BY dt, ${k}
 UNION ALL
 SELECT CAST(dt AS varchar) AS ts, '${k}' AS kind, ${k} AS dim, code, '' AS descr, SUM(txn_init) AS total, SUM(success) AS success
-FROM b WHERE dt >= DATE '{{TO_DATE}}' - INTERVAL '2' DAY
-GROUP BY dt, ${k}, code
+FROM b GROUP BY dt, ${k}, code
 HAVING SUM(txn_init) > SUM(success)`,
 ).join("\nUNION ALL\n")}
 UNION ALL
@@ -702,7 +701,21 @@ function mergeRows(section, rows) {
 // Breakdown: keep totals and code-kind rows, but only the top CODES_KEPT failure codes per
 // (day, kind, dim) — the long tail of bank × code rows is noise and bloats the cache.
 const CODES_KEPT = 5;
+const CODES_GLOBAL = 20;
 function trimBreakdown(rows) {
+  // Codes that matter anywhere in a kind (top CODES_GLOBAL by failures over the window)
+  // are kept for every dim and day, so per-code trend lines are complete, not just
+  // the days where the code happened to be in that row's top CODES_KEPT.
+  const byKind = new Map();
+  for (const r of rows) {
+    if (!r.code) continue;
+    const m = byKind.get(r.kind) || new Map();
+    m.set(r.code, (m.get(r.code) || 0) + r.total - r.success);
+    byKind.set(r.kind, m);
+  }
+  const major = new Map(
+    [...byKind].map(([kind, m]) => [kind, new Set([...m].sort((a, b) => b[1] - a[1]).slice(0, CODES_GLOBAL).map(([c]) => c))]),
+  );
   const groups = new Map();
   const out = [];
   for (const r of rows) {
@@ -714,7 +727,10 @@ function trimBreakdown(rows) {
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(r);
   }
-  for (const g of groups.values()) out.push(...g.sort((a, b) => b.total - b.success - (a.total - a.success)).slice(0, CODES_KEPT));
+  for (const g of groups.values()) {
+    g.sort((a, b) => b.total - b.success - (a.total - a.success));
+    out.push(...g.filter((r, i) => i < CODES_KEPT || major.get(r.kind)?.has(r.code)));
+  }
   return out;
 }
 
@@ -912,6 +928,16 @@ const sleep = (ms, signal) =>
       { once: true }
     );
   });
+
+/**
+ * Run one SQL on a Redash instance chosen by an env pair (URL + key always read from
+ * the same pair). Used by Product Wise for sources outside the morning-dashboard config.
+ */
+export function runRedashWithEnv(urlVar, keyVar, dataSourceId, sql, { signal, timeoutMs = 15 * 60 * 1000 } = {}) {
+  const env = { url: String(process.env[urlVar] || "").trim().replace(/\/+$/, ""), key: process.env[keyVar] || "" };
+  if (!env.url || !env.key) return Promise.reject(new Error(`Redash not configured (set ${urlVar} + ${keyVar} in .env)`));
+  return runRedashOnce(env, dataSourceId, sql, { signal, timeoutMs });
+}
 
 async function runRedashOnce(env, dataSourceId, sql, { signal, timeoutMs }) {
   if (!env.url || !env.key) throw new Error("Redash not configured (set PTYES_REDASH_URL + PTYES_REDASH_API_KEY in .env)");

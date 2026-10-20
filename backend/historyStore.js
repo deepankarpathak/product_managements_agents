@@ -25,6 +25,7 @@ export const DASHBOARDS = {
   morning: "Morning Dashboard",
   srsnippet: "Success Rate Snippet",
   product: "Product Wise",
+  unified: "Unified SR Dashboard",
 };
 
 const pad2 = (n) => String(n).padStart(2, "0");

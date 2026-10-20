@@ -20,6 +20,8 @@ import { retrieve as ragRetrieve } from "./rag/retrieve.js";
 import { buildDocsKnowledgeContext } from "./docsKnowledge.js";
 import { registerMorningDashboard } from "./morningDashboard.js";
 import { registerSrSnippet } from "./srSnippet.js";
+import { registerUnifiedDashboard } from "./unifiedDashboard.js";
+import { registerUnifiedDrill } from "./unifiedDrill.js";
 import { registerProductDashboard } from "./productDashboard.js";
 import { registerUtilities } from "./utilities.js";
 import { createHistoryStore, registerHistory } from "./historyStore.js";
@@ -3211,13 +3213,18 @@ const morningDashboard = registerMorningDashboard(app, { dataDir: path.join(__di
 // Success Rate Snippet (P2M PSP / errors / instrument, D-1 vs L7D / MTD vs LMTD) — /api/srsnippet/*
 const srSnippet = registerSrSnippet(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
 
-// Product Wise dashboard (UPI International activation / txns / errors) — /api/product/*
+// Unified SR Dashboard (Morning Dashboard + SR Snippet merged; runs alongside both for evaluation) — /api/udash/*
+const unifiedDashboard = registerUnifiedDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
+registerUnifiedDrill(app, { dataDir: path.join(__dirname, "data") });
+
+// Product Wise dashboard (UPI International activation / txns / errors / countries) — /api/product/*
 const productDashboard = registerProductDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
 registerHistory(app, {
   history: dashboardHistory,
   rerun: {
     morning: (rec) => morningDashboard.rerun(rec.rerun || {}),
     srsnippet: () => srSnippet.rerun(),
+    unified: (rec) => unifiedDashboard.rerun(rec.rerun || {}),
     product: (rec) => productDashboard.rerun(rec.rerun || {}),
   },
 });

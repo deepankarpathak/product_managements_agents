@@ -285,7 +285,7 @@ function AlertsPanel({ dashboard, from, to, active }) {
     return [...m.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
   }, [alerts]);
 
-  if (dashboard !== "all" && dashboard !== "morning") return null;
+  if (dashboard !== "all" && dashboard !== "morning" && dashboard !== "unified") return null;
   return (
     <section style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, margin: "16px 16px 0", maxWidth: 1500 - 32, marginInline: "auto" }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline", marginBottom: byDay.length ? 10 : 0 }}>
@@ -408,6 +408,7 @@ export default function DashboardHistory({ active = true }) {
             <select style={input} value={dashboard} onChange={(e) => setDashboard(e.target.value)}>
               <option value="all">All dashboards</option>
               <option value="morning">Morning Dashboard</option>
+              <option value="unified">Unified SR Dashboard</option>
               <option value="srsnippet">Success Rate Snippet</option>
               <option value="product">Product Wise</option>
             </select>

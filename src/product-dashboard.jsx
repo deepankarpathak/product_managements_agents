@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Product Wise dashboard — per-product health for Paytm TPAP handles
-// (PTYES, PTAXIS, PTSBI, PTHDFC). UPI International first; UPI Lite and Mandates later.
+// (PTYES, PTAXIS, PTSBI, PTHDFC). UPI International and UPI Plugin (@yesnext, see
+// PluginView); UPI Lite and Mandates later.
 // Backend /api/product/* returns raw daily counts for the last 30 complete days; the range
 // (1–15 days), handle filter and the "vs previous period" comparison are all computed here.
 //
@@ -29,6 +30,7 @@ const LOW_SR_PP = 5;
 
 const PRODUCTS = [
   { id: "international", label: "🌐 UPI International" },
+  { id: "plugin", label: "🔌 UPI Plugin" },
   { id: "lite", label: "⚡ UPI Lite", soon: true },
   { id: "mandates", label: "🔁 Mandates", soon: true },
 ];
@@ -67,7 +69,29 @@ const CODE_MEANING = {
   "U16-01188": "NPCI risk rule 1188 GLOBAL_UPI_LIMITS_BT_P2M_24HRS_NIPL — Bhutan merchant > ₹25K/txn or ₹1L/24h",
   "U30-IN": "REMITTER_ACT_INTL_SERVICE_NOT_ACTIVE — intl service not active on payer account (BD)",
   "(deemed)": "Deemed — outcome pending / not confirmed",
+  U08: "SYSTEM_EXCEPTION (TD)",
 };
+
+// ISO country code → name for the country-wise section.
+const COUNTRY_NAME = {
+  NP: "Nepal",
+  BT: "Bhutan",
+  LK: "Sri Lanka",
+  SG: "Singapore",
+  AE: "UAE",
+  US: "USA",
+  QA: "Qatar",
+  FR: "France",
+  KH: "Cambodia",
+  MU: "Mauritius",
+  OM: "Oman",
+  GB: "UK",
+  MV: "Maldives",
+  TT: "Trinidad & Tobago",
+  UNKNOWN: "Unknown",
+};
+const TOP_COUNTRIES_CHART = 5;
+const TOP_APP_CODES = 50;
 
 // ─── utils ───────────────────────────────────────────────────────────────────
 
@@ -233,9 +257,10 @@ function useWidth() {
 /**
  * Trend-line chart. days: x labels; lines: [{ name, color, values[], dashed? }];
  * bars?: { name, values[] } drawn faintly on their own scale; curFrom: index where the
- * current period starts (shaded). yFmt formats the line axis + tooltip.
+ * current period starts (shaded). yFmt formats the line axis + tooltip. dots: always mark
+ * every point (sparse series where most days are null).
  */
-function TrendChart({ days, lines, bars, curFrom = 0, yFmt = (v) => fmtPct(v), barFmt = fmtNum, height = 230 }) {
+function TrendChart({ days, lines, bars, curFrom = 0, yFmt = (v) => fmtPct(v), barFmt = fmtNum, height = 230, dots = false }) {
   const [ref, width] = useWidth();
   const [hover, setHover] = useState(null);
   const pad = { l: 52, r: 14, t: 12, b: 26 };
@@ -310,7 +335,7 @@ function TrendChart({ days, lines, bars, curFrom = 0, yFmt = (v) => fmtPct(v), b
         {lines.map((s) => (
           <g key={s.name}>
             <path d={path(s.values)} fill="none" stroke={s.color} strokeWidth={s.dashed ? 1.5 : 2} strokeDasharray={s.dashed ? "5,4" : undefined} />
-            {s.values.map((v, i) => (v != null && (n <= 16 || i === hover) ? <circle key={i} cx={xAt(i)} cy={yAt(v)} r={2.6} fill={s.color} /> : null))}
+            {s.values.map((v, i) => (v != null && (dots || n <= 16 || i === hover) ? <circle key={i} cx={xAt(i)} cy={yAt(v)} r={2.6} fill={s.color} /> : null))}
           </g>
         ))}
         {hover != null && <line x1={xAt(hover)} x2={xAt(hover)} y1={pad.t} y2={pad.t + h} stroke={C.text2} strokeOpacity={0.35} />}
@@ -412,7 +437,12 @@ function Kpi({ label, value, sub, color }) {
 
 function JobBadge({ job, cached }) {
   if (job?.status === "running")
-    return <span style={{ fontSize: 11, color: C.warn, whiteSpace: "nowrap" }}>● running · {fmtDur(Date.now() - job.startedAt)}</span>;
+    return (
+      <span style={{ fontSize: 11, color: C.warn, whiteSpace: "nowrap" }}>
+        ● running · {fmtDur(Date.now() - job.startedAt)}
+        {job.note ? ` · ${job.note}` : ""}
+      </span>
+    );
   if (!cached) return null;
   return (
     <span style={{ fontSize: 11, color: C.muted, whiteSpace: "nowrap" }} title={`Query took ${fmtDur(cached.durationMs)}`}>
@@ -468,6 +498,198 @@ function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, o
   );
 }
 
+// ─── UPI Plugin (@yesnext) ───────────────────────────────────────────────────
+//
+// One cached query ("daily": a row per day since launch, today included) feeds every
+// metric. Periods are IST calendar periods; weeks start Monday. "This week / month"
+// include today so far.
+
+const PLUGIN_METRICS = [
+  { key: "users", title: "User Creation", desc: "Users created on the @yesnext handle (PMS user, scope 10 · source channel 79) — distinct scope_cust_id." },
+  { key: "accounts", title: "Account Creation", desc: "Bank accounts linked by @yesnext users (PMS account), by account created_on." },
+  { key: "vpas", title: "VPA Creation", desc: "VPAs created for @yesnext users (PMS user_vpa) — distinct VPA." },
+  { key: "mpin_total", base: "accounts", baseLabel: "Accounts", title: "MPIN Total", desc: "Accounts with UPI PIN set (account.mpin_set = 1). SR = MPIN set / accounts linked." },
+  {
+    key: "mpin_listing",
+    base: "listing_base",
+    baseLabel: "Listed",
+    title: "MPIN During Listing",
+    desc: "PIN set on the account-listing page (account_cache.mpin_set = 1, via extended_info.tempAccRefId). SR = set during listing / accounts with a listing record.",
+  },
+  {
+    key: "mpin_post",
+    base: "post_base",
+    baseLabel: "Not set at listing",
+    title: "MPIN Post Addition",
+    desc: "PIN set after the account was added (account.mpin_set = 1 and account_cache.mpin_set = 0). SR = set post addition / accounts without a PIN at listing.",
+  },
+];
+const PLUGIN_TRENDS = [
+  { n: 14, label: "14 days" },
+  { n: 30, label: "30 days" },
+  { n: 60, label: "60 days" },
+  { n: 0, label: "All" },
+];
+
+/** IST calendar periods for "today" = YYYY-MM-DD. */
+function pluginPeriods(today) {
+  const t = toMs(today);
+  const dow = (new Date(t).getUTCDay() + 6) % 7; // Monday = 0
+  const weekStart = t - dow * DAY;
+  const monthStart = Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 1, 1);
+  const lastMonthStart = Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 2, 1);
+  const range = (a, b) => ({ from: toDay(a), to: toDay(b) }); // inclusive
+  return [
+    { key: "total", label: "Total", from: "0000-00-00", to: today, title: "All days since launch" },
+    { key: "today", label: "Today", ...range(t, t), title: `${fmtDay(today)} (so far)` },
+    { key: "yday", label: "Yesterday", ...range(t - DAY, t - DAY) },
+    { key: "tw", label: "This week", ...range(weekStart, t) },
+    { key: "lw", label: "Last week", ...range(weekStart - 7 * DAY, weekStart - DAY) },
+    { key: "tm", label: "This month", ...range(monthStart, t) },
+    { key: "lm", label: "Last month", ...range(lastMonthStart, monthStart - DAY) },
+    // Comparison bases for the partial current week / month: same number of days.
+    { key: "lwtd", hidden: true, ...range(weekStart - 7 * DAY, t - 7 * DAY) },
+    { key: "lmtd", hidden: true, ...range(lastMonthStart, Math.min(t - (monthStart - lastMonthStart), monthStart - DAY)) },
+  ].map((p) => ({ ...p, title: p.title || (p.from === p.to ? fmtDay(p.from) : `${fmtDay(p.from)} – ${fmtDay(p.to)}`) }));
+}
+
+function PluginView({ cached, job, onShowSql }) {
+  const [trend, setTrend] = useState(30);
+  const rows = useMemo(() => cached?.rows || [], [cached]);
+  // IST today; the cache window's toDate is tomorrow when data was fetched.
+  const today = toDay(toMs(toDay(Date.now() + 330 * 60000)));
+  const periods = useMemo(() => pluginPeriods(today), [today]);
+  const byDay = useMemo(() => new Map(rows.map((r) => [r.ts, r])), [rows]);
+  const sum = useCallback(
+    (from, to, key) => rows.reduce((a, r) => (r.ts >= from && r.ts <= to ? a + (r[key] || 0) : a), 0),
+    [rows],
+  );
+  const first = cached?.window?.fromDate || rows[0]?.ts || today;
+  const allDays = useMemo(() => daysBetween(first, toDay(toMs(today) + DAY)), [first, today]);
+  const days = trend ? allDays.slice(-trend) : allDays;
+
+  const stat = (m, p) => {
+    const c = sum(p.from, p.to, m.key);
+    const b = m.base ? sum(p.from, p.to, m.base) : null;
+    return { c, b, sr: m.base ? pct(c, b) : null };
+  };
+  const cellText = (m, p) => {
+    const s = stat(m, p);
+    return m.base ? `${s.c} (${fmtPct(s.sr)})` : String(s.c);
+  };
+  const vs = (cur, prev, what) => {
+    const p = chg(cur, prev);
+    return p == null ? (cur > 0 && !prev ? `new vs ${what}` : "—") : `${fmtSigned(p, "%", 0)} vs ${what}`;
+  };
+
+  const summaryCols = [
+    { key: "m", label: "Metric", align: "left", render: (r) => r.m.title, text: (r) => r.m.title },
+    ...periods.filter((p) => !p.hidden).map((p) => ({
+      key: p.key,
+      label: p.label,
+      title: p.title,
+      render: (r) => {
+        const s = stat(r.m, p);
+        return (
+          <span>
+            <b>{fmtNum(s.c)}</b>
+            {r.m.base && <span style={{ color: C.text2, fontSize: 11 }}> · {fmtPct(s.sr)}</span>}
+          </span>
+        );
+      },
+      text: (r) => cellText(r.m, p),
+    })),
+  ];
+  const summaryRows = PLUGIN_METRICS.map((m) => ({ id: m.key, m }));
+  const P = Object.fromEntries(periods.map((p) => [p.key, p]));
+
+  return (
+    <>
+      <Section
+        n="Σ"
+        title="@yesnext onboarding summary"
+        desc={`Counts per period; MPIN rows show count · success rate. Today ${P.today.title}; this week ${P.tw.title}; last week ${P.lw.title}; this month ${P.tm.title}; last month ${P.lm.title}. Weeks start Monday (IST).`}
+        job={job}
+        cached={cached}
+        onShowSql={onShowSql}
+        cols={summaryCols}
+        rows={rows.length ? summaryRows : []}
+      />
+      <div style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 12 }}>
+        <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>Trend</span>
+        {PLUGIN_TRENDS.map((t) => (
+          <button key={t.n} type="button" onClick={() => setTrend(t.n)} style={pill(trend === t.n)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {PLUGIN_METRICS.map((m, i) => {
+        const at = (d, k) => byDay.get(d)?.[k] || 0;
+        const counts = days.map((d) => at(d, m.key));
+        const s = Object.fromEntries(periods.map((p) => [p.key, stat(m, p)]));
+        const sub = (k, prevK, what) => {
+          const d = prevK ? vs(s[k].c, s[prevK].c, what) : "";
+          return m.base ? `SR ${fmtPct(s[k].sr)}${d ? ` · ${d}` : ""}` : d || undefined;
+        };
+        const cols = [
+          { key: "d", label: "Date", align: "left", render: (r) => fmtDay(r.d), text: (r) => r.d },
+          { key: "c", label: m.title, render: (r) => fmtNum(r.c) },
+          ...(m.base
+            ? [
+                { key: "b", label: m.baseLabel, render: (r) => fmtNum(r.b) },
+                { key: "sr", label: "SR", render: (r) => <b>{fmtPct(r.sr)}</b>, text: (r) => fmtPct(r.sr) },
+              ]
+            : []),
+        ];
+        const dayRows = [...days]
+          .reverse()
+          .map((d) => ({ id: d, d, c: at(d, m.key), b: m.base ? at(d, m.base) : null, sr: m.base ? pct(at(d, m.key), at(d, m.base)) : null }));
+        // Days with activity only (all days if the trend window has none).
+        const active = dayRows.filter((r) => r.c || r.b);
+        const tableRows = active.length ? active : dayRows;
+        const span = days.length ? `${fmtDay(days[0])} – ${fmtDay(days[days.length - 1])}` : "";
+        return (
+          <Section
+            key={m.key}
+            n={i + 1}
+            title={m.title}
+            desc={m.desc}
+            note={`Table: days with activity, ${span}.`}
+            job={job}
+            cached={cached}
+            onShowSql={onShowSql}
+            kpis={
+              <>
+                <Kpi label="Total" value={fmtNum(s.total.c)} sub={m.base ? `SR ${fmtPct(s.total.sr)}` : `since ${fmtDay(first)}`} color={C.accent} />
+                <Kpi label="Today" value={fmtNum(s.today.c)} sub={sub("today", "yday", "yday")} />
+                <Kpi label="Yesterday" value={fmtNum(s.yday.c)} sub={sub("yday")} />
+                <Kpi label="This week" value={fmtNum(s.tw.c)} sub={sub("tw", "lwtd", "LW to date")} />
+                <Kpi label="Last week" value={fmtNum(s.lw.c)} sub={sub("lw")} />
+                <Kpi label="This month" value={fmtNum(s.tm.c)} sub={sub("tm", "lmtd", "LM to date")} />
+                <Kpi label="Last month" value={fmtNum(s.lm.c)} sub={sub("lm")} />
+              </>
+            }
+            chart={
+              m.base ? (
+                <TrendChart
+                  days={days}
+                  lines={[{ name: `${m.title} SR`, color: SERIES[i % SERIES.length], values: days.map((d) => pct(at(d, m.key), at(d, m.base))) }]}
+                  bars={{ name: m.title, values: counts }}
+                  dots
+                />
+              ) : (
+                <TrendChart days={days} lines={[{ name: m.title, color: SERIES[i % SERIES.length], values: counts }]} yFmt={(v) => (v == null ? "—" : fmtNum(v))} dots />
+              )
+            }
+            cols={cols}
+            rows={rows.length ? tableRows : []}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 export default function ProductDashboard() {
@@ -479,6 +701,7 @@ export default function ProductDashboard() {
   const [sql, setSql] = useState(null);
   const [bankPick, setBankPick] = useState(null); // null = default top 5
   const [codePick, setCodePick] = useState(null);
+  const [countryPick, setCountryPick] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -523,12 +746,13 @@ export default function ProductDashboard() {
   const act = useMemo(() => pick("activation"), [pick]);
   const txns = useMemo(() => pick("txns"), [pick]);
   const errs = useMemo(() => pick("errors"), [pick]);
+  const ctry = useMemo(() => pick("countries"), [pick]);
 
   // Period: current = last `range` days ending at the latest day with data; previous = the N before.
   const P = useMemo(() => {
     let last = "";
     let first = "";
-    for (const q of ["activation", "txns", "errors"]) {
+    for (const q of ["activation", "txns", "errors", "countries"]) {
       for (const r of cache[q]?.rows || []) {
         if (r.ts > last) last = r.ts;
         if (!first || r.ts < first) first = r.ts;
@@ -672,10 +896,84 @@ export default function ProductDashboard() {
     return { items, total, prevTotal, rising, falling };
   }, [errs, P]);
 
+  // Sections 5 and 6 use fixed periods anchored on the latest data day Y (as in the
+  // reference queries): Yesterday = Y, D-2 = Y-1, L7D = Y-6 … Y (7 days incl. Y).
+  const Q = useMemo(() => {
+    if (!P) return null;
+    const y = P.to;
+    const l7 = Array.from({ length: 7 }, (_, i) => toDay(toMs(y) - (6 - i) * DAY));
+    return { y, d2: toDay(toMs(y) - DAY), l7, l7Set: new Set(l7) };
+  }, [P]);
+
+  // ── Section 5: txn SR by country ──
+  const s5 = useMemo(() => {
+    if (!P || !Q) return null;
+    const by = (keep) => sumBy(ctry.filter(keep), (r) => r.country, ["total", "succ", "term"]);
+    const y = by((r) => r.ts === Q.y);
+    const d2 = by((r) => r.ts === Q.d2);
+    const l7 = by((r) => Q.l7Set.has(r.ts));
+    const daily = sumBy(ctry, (r) => `${r.ts}|${r.country}`, ["succ", "term"]);
+    const z = { total: 0, succ: 0, term: 0 };
+    const all = (m) => [...m.values()].reduce((a, v) => ({ total: a.total + v.total, succ: a.succ + v.succ, term: a.term + v.term }), { ...z });
+    const row = (id, yv, dv, lv, extra = {}) => {
+      const ysr = pct(yv.succ, yv.term);
+      const lsr = pct(lv.succ, lv.term);
+      return { id, y: yv.total, d2: dv.total, l7avg: lv.total / 7, ysr, d2sr: pct(dv.succ, dv.term), l7sr: lsr, dpp: ysr != null && lsr != null ? ysr - lsr : null, ...extra };
+    };
+    const countries = [...new Set([...y.keys(), ...d2.keys(), ...l7.keys()])].sort((a, b) => (y.get(b)?.total || 0) - (y.get(a)?.total || 0) || (l7.get(b)?.total || 0) - (l7.get(a)?.total || 0) || a.localeCompare(b));
+    const items = countries.map((c) =>
+      row(c, y.get(c) || z, d2.get(c) || z, l7.get(c) || z, {
+        country: c,
+        daily: P.chart.map((d) => {
+          const v = daily.get(`${d}|${c}`);
+          return v ? pct(v.succ, v.term) : null;
+        }),
+      }),
+    );
+    const total = row("__total", all(y), all(d2), all(l7), { _total: true });
+    return { items, total, srOf: (c, d) => (daily.get(`${d}|${c}`) ? pct(daily.get(`${d}|${c}`).succ, daily.get(`${d}|${c}`).term) : null) };
+  }, [ctry, P, Q]);
+
+  // ── Section 6: failures by app_resp_code (top 50 by yesterday) ──
+  const s6 = useMemo(() => {
+    if (!P || !Q) return null;
+    const fails = errs.filter((r) => r.status === "FAILURE" && r.app && String(r.app).trim());
+    const codeOf = (r) => String(r.app).trim();
+    const y = sumBy(fails.filter((r) => r.ts === Q.y), codeOf, ["c"]);
+    const d2 = sumBy(fails.filter((r) => r.ts === Q.d2), codeOf, ["c"]);
+    const l7 = sumBy(fails.filter((r) => Q.l7Set.has(r.ts)), codeOf, ["c"]);
+    const daily = sumBy(fails, (r) => `${r.ts}|${codeOf(r)}`, ["c"]);
+    const g = (m, k) => m.get(k)?.c || 0;
+    const items = [...new Set([...y.keys(), ...d2.keys(), ...l7.keys()])]
+      .map((code) => {
+        const yc = g(y, code);
+        const l7avg = g(l7, code) / 7;
+        return {
+          id: code,
+          code,
+          meaning: CODE_MEANING[code] || "",
+          y: yc,
+          d2: g(d2, code),
+          l7avg,
+          vsL7: trendOf(yc, l7avg),
+          vsD2: trendOf(yc, g(d2, code)),
+          daily: P.chart.map((d) => g(daily, `${d}|${code}`)),
+        };
+      })
+      .sort((a, b) => b.y - a.y || a.code.localeCompare(b.code))
+      .slice(0, TOP_APP_CODES);
+    const sumM = (m) => [...m.values()].reduce((a, v) => a + v.c, 0);
+    const yt = sumM(y);
+    const lt = sumM(l7) / 7;
+    const total = { id: "__total", _total: true, code: "All failures", meaning: "", y: yt, d2: sumM(d2), l7avg: lt, vsL7: trendOf(yt, lt), vsD2: trendOf(yt, sumM(d2)), daily: [] };
+    return { items, total };
+  }, [errs, P, Q]);
+
   // Chart selections default to the top 5; reset when the range / handle changes the ranking.
   useEffect(() => {
     setBankPick(null);
     setCodePick(null);
+    setCountryPick(null);
   }, [range, handleSel, product]);
   const toggle = (sel, setSel, defaults, id) => {
     const base = sel || defaults;
@@ -777,6 +1075,49 @@ export default function ProductDashboard() {
     : [];
   const s4Rows = s4 ? s4.items.map((i) => ({ ...i, _active: codeSel.includes(i.code), _onClick: () => toggle(codePick, setCodePick, codeDefault, i.code) })) : [];
 
+  // Section 5 table
+  const countryLabel = (c) => (COUNTRY_NAME[c] ? `${COUNTRY_NAME[c]} (${c})` : c);
+  const countryDefault = s5 ? s5.items.filter((i) => i.country !== "UNKNOWN").slice(0, TOP_COUNTRIES_CHART).map((i) => i.country) : [];
+  const countrySel = countryPick || countryDefault;
+  const qy = Q ? fmtDay(Q.y) : "—";
+  const qd2 = Q ? fmtDay(Q.d2) : "—";
+  const ql7 = Q ? `${fmtDay(Q.l7[0])} – ${fmtDay(Q.l7[6])}` : "—";
+  const s5Cols = s5
+    ? [
+        {
+          key: "country",
+          label: "Country",
+          align: "left",
+          render: (r) => (r._total ? "All countries" : <span>{countrySel.includes(r.country) && <span style={{ color: SERIES[countrySel.indexOf(r.country) % SERIES.length] }}>● </span>}{countryLabel(r.country)}</span>),
+          text: (r) => (r._total ? "All countries" : r.country),
+        },
+        { key: "y", label: "Yesterday Txns", title: qy, render: (r) => fmtNum(r.y) },
+        { key: "d2", label: "D-2 Txns", title: qd2, render: (r) => fmtNum(r.d2) },
+        { key: "l7avg", label: "L7D Avg / Day", title: ql7, render: (r) => fmtNum(r.l7avg) },
+        { key: "ysr", label: "Yesterday SR", title: qy, render: (r) => <b>{srCell(r.ysr, r._total ? null : s5.total.ysr)}</b>, text: (r) => fmtPct(r.ysr, 2) },
+        { key: "d2sr", label: "D-2 SR", title: qd2, render: (r) => fmtPct(r.d2sr) },
+        { key: "l7sr", label: "L7D SR", title: `Pooled SR over ${ql7}`, render: (r) => fmtPct(r.l7sr) },
+        { key: "dpp", label: "vs L7D", title: "Yesterday SR − L7D SR, percentage points", render: (r) => <span style={{ color: ppTone(r.dpp), fontWeight: Math.abs(r.dpp || 0) >= 2 ? 700 : 400 }}>{fmtSigned(r.dpp, " pp")}</span>, text: (r) => fmtSigned(r.dpp, " pp") },
+        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} color={ppTone(r.dpp) === C.text2 ? "#94a3b8" : ppTone(r.dpp)} curFrom={curFrom} />), text: () => "" },
+      ]
+    : [];
+  const s5Rows = s5 ? [...s5.items.map((i) => ({ ...i, _active: countrySel.includes(i.country), _onClick: () => toggle(countryPick, setCountryPick, countryDefault, i.country) })), s5.total] : [];
+
+  // Section 6 table
+  const s6Cols = s6
+    ? [
+        { key: "code", label: "App Resp Code", align: "left", render: (r) => (r._total ? "All failures" : <code style={{ fontSize: 12 }}>{r.code}</code>), text: (r) => r.code },
+        { key: "meaning", label: "Meaning", align: "left", wrap: true, render: (r) => <span style={{ fontSize: 12, color: C.text2, display: "inline-block", minWidth: 180, maxWidth: 340 }}>{r._total ? "" : r.meaning || "—"}</span>, text: (r) => r.meaning },
+        { key: "y", label: "Yesterday", title: qy, render: (r) => fmtNum(r.y) },
+        { key: "d2", label: "D-2", title: qd2, render: (r) => fmtNum(r.d2) },
+        { key: "l7avg", label: "L7D Avg / Day", title: ql7, render: (r) => (r.l7avg ? r.l7avg.toFixed(1) : "0") },
+        { key: "vsL7", label: "vs L7D Avg", title: `Yesterday vs L7D daily average; ±${TREND_PCT}% flagged`, render: (r) => <TrendBadge t={r.vsL7} />, text: (r) => (r.vsL7.kind === "new" ? "NEW" : fmtSigned(r.vsL7.pct, "%", 0)) },
+        { key: "vsD2", label: "vs D-2", title: `Yesterday vs D-2; ±${TREND_PCT}% flagged`, render: (r) => <TrendBadge t={r.vsD2} />, text: (r) => (r.vsD2.kind === "new" ? "NEW" : fmtSigned(r.vsD2.pct, "%", 0)) },
+        { key: "daily", label: "Daily", title: `Daily failures, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} color={r.vsL7.kind === "up" || r.vsL7.kind === "new" ? C.bad : r.vsL7.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />), text: () => "" },
+      ]
+    : [];
+  const s6Rows = s6 ? [...s6.items, s6.total] : [];
+
   const kpiDelta = (cur, prev, unit = " pp") => (cur != null && prev != null ? `${fmtSigned(cur - prev, unit)} vs prev` : "vs prev —");
 
   return (
@@ -785,7 +1126,9 @@ export default function ProductDashboard() {
         <div style={{ flex: 1, minWidth: 260 }}>
           <div style={{ fontSize: 20, fontWeight: 700 }}>Product Wise</div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
-            {PRODUCTS.find((p) => p.id === product)?.label.replace(/^\S+\s/, "")} · {handleLabel} · current {periodLabel} vs previous {prevLabel} · source Trino (tpap_pms / switch snapshots)
+            {product === "plugin"
+              ? "UPI Plugin · @yesnext handle · daily since launch, today included · source PTYBL Redash (PMS, live)"
+              : `${PRODUCTS.find((p) => p.id === product)?.label.replace(/^\S+\s/, "")} · ${handleLabel} · current ${periodLabel} vs previous ${prevLabel} · source Trino (tpap_pms / switch snapshots)`}
           </div>
         </div>
         <a
@@ -811,22 +1154,26 @@ export default function ProductDashboard() {
             </button>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>Range</span>
-          {RANGES.map((r) => (
-            <button key={r.n} type="button" onClick={() => setRange(r.n)} style={pill(range === r.n)}>
-              {r.label}
-            </button>
-          ))}
-        </div>
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>PSP</span>
-          {["all", ...HANDLES].map((h) => (
-            <button key={h} type="button" onClick={() => setHandleSel(h)} style={pill(handleSel === h)}>
-              {h === "all" ? "All 4" : h.toUpperCase()}
-            </button>
-          ))}
-        </div>
+        {product !== "plugin" && (
+          <>
+            <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>Range</span>
+              {RANGES.map((r) => (
+                <button key={r.n} type="button" onClick={() => setRange(r.n)} style={pill(range === r.n)}>
+                  {r.label}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>PSP</span>
+              {["all", ...HANDLES].map((h) => (
+                <button key={h} type="button" onClick={() => setHandleSel(h)} style={pill(handleSel === h)}>
+                  {h === "all" ? "All 4" : h.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {error && (
@@ -836,23 +1183,28 @@ export default function ProductDashboard() {
       )}
       {state && (
         <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
-          Opening this tab only reads cached results (last 30 complete days). Backend auto-refreshes daily at {state.schedule?.join(" & ")} IST. Click a bank / error row to add or remove it from the chart.
+          {product === "plugin"
+            ? `Opening this tab only reads cached results (every day since launch, today so far). Backend auto-refreshes ${state.schedule?.join(" & ")}; click Refresh for the latest.`
+            : `Opening this tab only reads cached results (last 30 complete days). Backend auto-refreshes daily at ${state.schedule?.join(" & ")} IST. Click a bank / error row to add or remove it from the chart.`}
         </div>
       )}
 
-      <Section
-        n={1}
-        title="Activation by day & PSP"
-        desc="UPI International activation (account_activation_snapshot_v3, service INTERNATIONAL) by Paytm TPAP handle. SR = ACTIVE / attempts. Red = day SR more than 5 pp below the period SR."
-        job={jobs.activation}
-        cached={cache.activation}
-        onShowSql={() => showSql("activation")}
-        kpis={
-          s1 && (
-            <>
-              <Kpi label="Attempts" value={fmtNum(s1.cur.attempts)} sub={`${fmtSigned(chg(s1.cur.attempts, s1.prev.attempts), "%")} vs prev`} />
-              <Kpi label="Activated" value={fmtNum(s1.cur.activated)} sub={`${fmtSigned(chg(s1.cur.activated, s1.prev.activated), "%")} vs prev`} />
-              <Kpi label="Activation SR" value={fmtPct(s1.curSr)} sub={kpiDelta(s1.curSr, s1.prevSr)} color={s1.prevSr != null && s1.curSr < s1.prevSr - 1 ? C.bad : undefined} />
+      {product === "plugin" && <PluginView cached={cache.daily} job={jobs.daily} onShowSql={() => showSql("daily")} />}
+      {product !== "plugin" && (
+        <>
+          <Section
+            n={1}
+            title="Activation by day & PSP"
+            desc="UPI International activation (account_activation_snapshot_v3, service INTERNATIONAL) by Paytm TPAP handle. SR = ACTIVE / attempts. Red = day SR more than 5 pp below the period SR."
+            job={jobs.activation}
+            cached={cache.activation}
+            onShowSql={() => showSql("activation")}
+            kpis={
+              s1 && (
+                <>
+                  <Kpi label="Attempts" value={fmtNum(s1.cur.attempts)} sub={`${fmtSigned(chg(s1.cur.attempts, s1.prev.attempts), "%")} vs prev`} />
+                  <Kpi label="Activated" value={fmtNum(s1.cur.activated)} sub={`${fmtSigned(chg(s1.cur.activated, s1.prev.activated), "%")} vs prev`} />
+                  <Kpi label="Activation SR" value={fmtPct(s1.curSr)} sub={kpiDelta(s1.curSr, s1.prevSr)} color={s1.prevSr != null && s1.curSr < s1.prevSr - 1 ? C.bad : undefined} />
             </>
           )
         }
@@ -954,6 +1306,58 @@ export default function ProductDashboard() {
         cols={s4Cols}
         rows={s4Rows}
       />
+
+      <Section
+        n={5}
+        title="Txn SR country wise"
+        desc={`UPI International txns by merchant country (extended_info.countryCode). SR = (SUCCESS + DEEMED) / (SUCCESS + FAILURE + DEEMED + PENDING). Fixed periods: Yesterday ${qy}, D-2 ${qd2}, L7D ${ql7} — the range picker only changes the chart and the Trend column.`}
+        job={jobs.countries}
+        cached={cache.countries}
+        onShowSql={() => showSql("countries")}
+        kpis={
+          s5 && (
+            <>
+              <Kpi label="Countries yesterday" value={s5.items.filter((i) => i.y > 0).length} />
+              <Kpi label="Yesterday SR" value={fmtPct(s5.total.ysr, 2)} sub={`${fmtSigned(s5.total.dpp, " pp")} vs L7D`} color={s5.total.dpp != null && s5.total.dpp < -1 ? C.bad : undefined} />
+              <Kpi label="Top country" value={s5.items[0] ? countryLabel(s5.items[0].country) : "—"} sub={s5.items[0] && s5.total.y ? `${fmtPct(pct(s5.items[0].y, s5.total.y))} of yesterday's txns` : undefined} />
+            </>
+          )
+        }
+        chart={
+          s5 &&
+          P && (
+            <TrendChart
+              days={P.chart}
+              lines={countrySel.map((c, i) => ({ name: countryLabel(c), color: SERIES[i % SERIES.length], values: P.chart.map((d) => s5.srOf(c, d)) }))}
+              curFrom={curFrom}
+            />
+          )
+        }
+        cols={s5Cols}
+        rows={s5Rows}
+      />
+
+      <Section
+        n={6}
+        title={`Error code wise count (top ${TOP_APP_CODES})`}
+        desc={`FAILURE txns by app_resp_code (blank codes excluded), ranked by yesterday's count. Fixed periods: Yesterday ${qy}, D-2 ${qd2}, L7D ${ql7}. ▲ red = up ≥ ${TREND_PCT}%, ▼ green = down ≥ ${TREND_PCT}%.`}
+        job={jobs.errors}
+        cached={cache.errors}
+        onShowSql={() => showSql("errors")}
+        kpis={
+          s6 && (
+            <>
+              <Kpi label="Failures yesterday" value={fmtNum(s6.total.y)} sub={`${fmtSigned(s6.total.vsL7.pct, "%", 0)} vs L7D avg`} color={s6.total.vsL7.kind === "up" ? C.bad : undefined} />
+              <Kpi label="Codes up vs L7D" value={s6.items.filter((i) => i.vsL7.kind === "up" || i.vsL7.kind === "new").length} color={C.bad} />
+              <Kpi label="Codes down vs L7D" value={s6.items.filter((i) => i.vsL7.kind === "down").length} color={C.good} />
+            </>
+          )
+        }
+        cols={s6Cols}
+        rows={s6Rows}
+      />
+        </>
+      )}
 
       {sql && (
         <div

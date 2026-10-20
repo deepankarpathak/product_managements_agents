@@ -244,12 +244,34 @@ const PRODUCT = {
     srByGroup({ label: "bank", unit: "day", rows: rows.map((r) => ({ ts: r.ts, bank: r.bank, total: r.attempts, success: r.activated })), nameOf: (r) => r.bank, minShare: 0.01 }),
   "international-txns": (rows) =>
     srByGroup({ label: "PSP handle", unit: "day", rows: rows.map((r) => ({ ts: r.ts, handle: r.handle, total: r.c, success: r.status === "SUCCESS" ? r.c : 0 })), nameOf: (r) => r.handle, minShare: 0 }),
+  "international-countries": (rows) =>
+    srByGroup({ label: "country", unit: "day", rows: rows.map((r) => ({ ts: r.ts, country: r.country, total: r.term, success: r.succ })), nameOf: (r) => r.country, minShare: 0.005 }),
   "international-errors": (rows) => codeShare({ rows: rows.map((r) => ({ ts: r.ts, code: r.code, cnt: r.c })), topN: 15, label: "error code" }),
 };
 
 /** Returns { summary, standouts[], actions[], nextSteps[], tables[] } or null. */
+// Unified SR Dashboard sections, reshaped onto the Morning analyzers.
+const UNIFIED = {
+  raw: (rows, ctx) => {
+    const m = new Map();
+    for (const r of rows) {
+      if (r.grp !== "tot") continue;
+      const k = `${r.ts}|${r.handle}|${r.flow}`;
+      const a = m.get(k) || { ts: r.ts, handle: r.handle, flow: r.flow, total: 0, success: 0 };
+      a.total += r.cnt;
+      if (r.status === "SUCCESS") a.success += r.cnt;
+      m.set(k, a);
+    }
+    return MORNING.sr([...m.values()], ctx);
+  },
+  bank: (rows, ctx) => MORNING.bank(rows.filter((r) => r.grp === "bank"), ctx),
+  bankday: (rows, ctx) => MORNING.payerbank(rows, ctx),
+  share: (rows, ctx) => MORNING.share(rows, ctx),
+  dims: (rows) => MORNING.flowsr(rows.filter((r) => r.kind === "flow").map((r) => ({ ...r, flow: r.dim }))),
+};
+
 export function analyze(dashboard, section, rows, ctx = {}) {
-  const fn = ({ srsnippet: SNIPPET, product: PRODUCT }[dashboard] || MORNING)[section];
+  const fn = ({ srsnippet: SNIPPET, product: PRODUCT, unified: UNIFIED }[dashboard] || MORNING)[section];
   if (!fn || !Array.isArray(rows)) return null;
   try {
     return fn(rows, ctx);

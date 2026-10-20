@@ -43,10 +43,10 @@ WHERE dt >= DATE '{{FROM_DATE}}'
   AND lower(payer_handle) IN ({{HANDLES}})`;
 
 // Breakdown (triage table): day totals per (handle, kind, dim) over the last
-// BREAKDOWN_DAYS days, plus per-failure-code rows for the last CODE_DAYS days only
-// (inline "top decline codes" just needs the latest day). code = '' marks a total row.
+// BREAKDOWN_DAYS days, plus per-failure-code rows over the same days (top decline
+// codes for the latest day, per-code trend lines). code = '' marks a total row.
 const BREAKDOWN_DAYS = 10;
-const CODE_DAYS = 2;
+const CODE_DAYS = BREAKDOWN_DAYS;
 const BREAKDOWN_KINDS = [
   ["psp", PAYEE_PSP_CASE],
   ["bank", "COALESCE(NULLIF(trim(payer_bank), ''), 'Others')"],
@@ -136,7 +136,21 @@ const num = (v) => (v == null ? 0 : Number(v) || 0);
 // Breakdown: keep total rows, and only the top CODES_KEPT failure codes per
 // (day, handle, kind, dim) — the long tail is noise and bloats the cache.
 const CODES_KEPT = 5;
+const CODES_GLOBAL = 20;
 function trimBreakdown(rows) {
+  // Codes that matter anywhere in a kind (top CODES_GLOBAL by failures over the window)
+  // are kept for every dim and day, so per-code trend lines are complete, not just
+  // the days where the code happened to be in that row's top CODES_KEPT.
+  const byKind = new Map();
+  for (const r of rows) {
+    if (!r.code) continue;
+    const m = byKind.get(r.kind) || new Map();
+    m.set(r.code, (m.get(r.code) || 0) + r.total - r.success);
+    byKind.set(r.kind, m);
+  }
+  const major = new Map(
+    [...byKind].map(([kind, m]) => [kind, new Set([...m].sort((a, b) => b[1] - a[1]).slice(0, CODES_GLOBAL).map(([c]) => c))]),
+  );
   const groups = new Map();
   const out = [];
   for (const r of rows) {
@@ -148,7 +162,10 @@ function trimBreakdown(rows) {
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(r);
   }
-  for (const g of groups.values()) out.push(...g.sort((a, b) => b.total - b.success - (a.total - a.success)).slice(0, CODES_KEPT));
+  for (const g of groups.values()) {
+    g.sort((a, b) => b.total - b.success - (a.total - a.success));
+    out.push(...g.filter((r, i) => i < CODES_KEPT || major.get(r.kind)?.has(r.code)));
+  }
   return out;
 }
 

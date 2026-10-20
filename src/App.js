@@ -7,6 +7,7 @@ import AnalystAgentTab from "./analyst-agent.jsx";
 import AlphaAgent from "./alpha-agent.jsx";
 import MorningDashboard from "./morning-dashboard.jsx";
 import SrSnippet from "./sr-snippet.jsx";
+import UnifiedSrDashboard from "./sr-unified-dashboard.jsx";
 import ProductDashboard from "./product-dashboard.jsx";
 import Utilities from "./utilities.jsx";
 import DashboardHistory from "./dashboard-history.jsx";
@@ -21,14 +22,15 @@ const TAB_ANALYST = "analyst";
 const TAB_ALPHA = "alpha";
 const TAB_MORNING = "morning";
 const TAB_SRSNIPPET = "srsnippet";
+const TAB_UNIFIED = "srdash";
 const TAB_PRODUCT = "product";
 const TAB_UTILITIES = "utilities";
 const TAB_HISTORY = "history";
 
 // Bookmarkable: http://localhost:3000/#morning opens the Morning Dashboard,
-// #srsnippet the Success Rate Snippet, #product the Product Wise dashboard, #utilities the Utilities dashboard.
+// #srsnippet the Success Rate Snippet, #srdash the Unified SR Dashboard (evaluation), #product the Product Wise dashboard, #utilities the Utilities dashboard.
 // #history (optionally #history?dashboard=morning|srsnippet) opens the History tab.
-const HASH_TABS = { "#morning": TAB_MORNING, "#srsnippet": TAB_SRSNIPPET, "#product": TAB_PRODUCT, "#utilities": TAB_UTILITIES, "#history": TAB_HISTORY };
+const HASH_TABS = { "#morning": TAB_MORNING, "#srsnippet": TAB_SRSNIPPET, "#srdash": TAB_UNIFIED, "#product": TAB_PRODUCT, "#utilities": TAB_UTILITIES, "#history": TAB_HISTORY };
 const initialTab = () => HASH_TABS[window.location.hash.split("?")[0]] || TAB_PRD;
 
 function App() {
@@ -192,6 +194,25 @@ function App() {
 
         <button
           type="button"
+          onClick={() => setActiveTab(TAB_UNIFIED)}
+          title="Morning Dashboard + Success Rate Snippet merged — evaluation build"
+          style={{
+            padding: "8px 20px",
+            margin: 0,
+            border: "none",
+            borderBottom: activeTab === TAB_UNIFIED ? "2px solid #60a5fa" : "2px solid transparent",
+            background: activeTab === TAB_UNIFIED ? "#1e293b" : "transparent",
+            color: activeTab === TAB_UNIFIED ? "#f8fafc" : "#64748b",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          ◎ Unified SR (beta)
+        </button>
+
+        <button
+          type="button"
           onClick={() => setActiveTab(TAB_PRODUCT)}
           style={{
             padding: "8px 20px",
@@ -275,6 +296,9 @@ function App() {
       </div>
       <div style={{ flex: 1, display: activeTab === TAB_SRSNIPPET ? "block" : "none" }}>
         <SrSnippet />
+      </div>
+      <div style={{ flex: 1, display: activeTab === TAB_UNIFIED ? "block" : "none" }}>
+        <UnifiedSrDashboard />
       </div>
       <div style={{ flex: 1, display: activeTab === TAB_PRODUCT ? "block" : "none" }}>
         <ProductDashboard />
