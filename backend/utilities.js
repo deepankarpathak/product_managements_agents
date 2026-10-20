@@ -3,7 +3,7 @@
 // Routes (all under /api/utils):
 //   POST /handle-finder   { term } → top payee VPAs (last 3 days) containing `term`
 
-import { runTrino } from "./morningDashboard.js";
+import { runTrino } from "./trinoClient.js";
 
 const TIMEOUT_MS = 15 * 60 * 1000;
 

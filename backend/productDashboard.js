@@ -18,7 +18,7 @@
 
 import fs from "fs";
 import path from "path";
-import { runTrino } from "./morningDashboard.js";
+import { runTrino } from "./trinoClient.js";
 import { analyze } from "./historyInsights.js";
 import { fetchPluginDaily, PLUGIN_SQL, PLUGIN_START_DATE } from "./pluginDashboard.js";
 

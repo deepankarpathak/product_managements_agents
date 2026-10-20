@@ -50,6 +50,52 @@ prd-agent/
 
 ---
 
+## SR dashboards
+
+Success-rate dashboards share the same backend and UI. They query the DWH (Trino) and, for short windows, the live switch DB via Redash. Results are cached under `backend/data/` (gitignored).
+
+| Tab | Hash | Purpose | Source |
+|---|---|---|---|
+| **Unified SR (beta)** | `#srdash` | Merged Morning + Snippet view: sections A–K | `src/sr-unified-dashboard.jsx`, `backend/unifiedDashboard.js` |
+| Success Rate Snippet | `#srsnippet` | P2M SR snapshot for the 4 TPAP handles | `src/sr-snippet.jsx`, `backend/srSnippet.js` |
+| ☀ Morning Dashboard | `#morning` | Legacy, being replaced by Unified SR; kept until retired | `src/morning-dashboard.jsx`, `backend/morningDashboard.js` |
+
+Unified SR sections:
+
+| Section | Covers |
+|---|---|
+| A | SR breakdown, impact ranked by PSP, bank, instrument and flow, with a filter bar |
+| B | Decline codes: NPCI description, ₹ value, D-1…D-3, top impacted banks |
+| C | SR by handle × flow (intraday) |
+| D | Error code trend, failures only (TD / BD / RD) |
+| E | U09 trend, intraday or 15 days, by payee PSP |
+| F | Payer (remitter) bank report: health, contribution, error spikes, hourly DWH bank check |
+| G | Payee PSP SR%, success and volume, plus merchants |
+| H | Payer instrument SR, including Postpaid / Credit Line |
+| I | Txn share by payer handle, OS, instrument and category |
+| J | Raw-txn drill-down and sample-transaction download |
+| K | Escalation candidates: score, recipient, Minto-style email draft |
+
+Shared modules:
+
+| File | Role |
+|---|---|
+| `backend/trinoClient.js` | Trino runner with a shared concurrency limiter, plus the Redash runner. Used by every dashboard. |
+| `backend/unifiedDrill.js` | `/api/udash/drill/*`: on-demand drill-down, samples, durations |
+| `backend/bankReport.js` | Bank report split, error spikes, intraday bank alerts |
+| `backend/srAlertMessage.js` | Slack SR alert / daily digest text |
+| `src/sr-shared.jsx` | KPI strip, declines table and breakdown views shared by the SR tabs (`morning-breakdown.jsx` re-exports it) |
+| `src/bank-health.mjs` | Bank health v2: shift-share contribution, z-score vs the bank's own σ, 2-day persistence |
+| `src/escalation.mjs`, `src/unified-psp.mjs`, `src/unified-scorecard.jsx`, `src/breakdown-*.{mjs,jsx}` | Escalation scoring, PSP mapping, scorecards, breakdown tables |
+
+API: `/api/udash/*` (state, run, config, annotations, drill), `/api/srsnippet/*`, `/api/mdash/*` (legacy), `/api/history/*`. Every run is saved to Dashboard History.
+
+Relevant env (values in `.env` only): `TRINO_API_URL`, `TRINO_SERVICE_USER`, `TRINO_SERVICE_PASSWORD`, `TRINO_CATALOG`, `TRINO_SCHEMA`, `TRINO_SOURCE`, `TRINO_EXECUTE_AS_USER`, `TRINO_IMPERSONATION`, `MDASH_TRINO_MAX_CONCURRENT` (default 3), `PTYES_REDASH_URL` / `PTYES_REDASH_API_KEY` (or `MDASH_REDASH_*` / `REDASH_*`), `SLACK_WEBHOOK_URL`.
+
+The live switch-DB bank alert (`bankalert`) is **off** by default. The DWH bank check (`bankdwh`) runs hourly.
+
+---
+
 ## LLM routing
 
 All agents except Analyst use `POST /api/generate` with auto-fallback chain:

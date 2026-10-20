@@ -13,7 +13,7 @@
 
 import fs from "fs";
 import path from "path";
-import { runTrino } from "./morningDashboard.js";
+import { runTrino } from "./trinoClient.js";
 import { analyze } from "./historyInsights.js";
 
 // History tab labels per section.
