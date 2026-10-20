@@ -32,6 +32,7 @@
 .claude/worktrees/
 .claude/*.log
 .claude/.DS_Store
+.claude/settings.json
 .env.local
 .env.development.local
 .env.test.local
@@ -66,3 +67,9 @@ server copy.js
 /src/prd-agent-v7 copy.jsx
 /src/uat-agent1 copy 2.jsx
 /claude/worktrees/
+
+# JIRA agent generated output (sample RRNs, escalation drafts)
+JIRA-agent/output/
+
+# Local Jira MCP server (tool code + node_modules, not part of the app)
+mcp/jira-mcp/
