@@ -1901,23 +1901,92 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
 
   // Incident annotations (NPCI / bank downtime notices, festivals): drawn on the trend charts
   // and shown in the bank deep-dive. [{ id, date, end?, label, scope: "all" | payer bank code }]
+  // Investigation verdicts (from Premium /investigate) are the same records with kind "investigation":
+  // + status (CONFIRMED | DISPROVED | SUSPECTED | OPEN | CLOSED-NON-ISSUE), confidence, ticket, briefId.
   const ANNOT_FILE = path.join(dataDir, "udash-annotations.json");
+  const VERDICT_STATUS = ["CONFIRMED", "DISPROVED", "SUSPECTED", "OPEN", "CLOSED-NON-ISSUE"];
+  const VERDICT_CONF = ["HIGH", "MEDIUM", "LOW"];
   app.get("/api/udash/annotations", handle(() => ({ annotations: readJsonFile(ANNOT_FILE, []) })));
   app.post(
     "/api/udash/annotations",
     handle((req) => {
-      const { date, end = null, label, scope = "all" } = req.body || {};
+      const { date, end = null, label, scope = "all", kind = "incident", status = null, confidence = null, ticket = null, briefId = null } = req.body || {};
       const day = /^\d{4}-\d{2}-\d{2}$/;
       if (!day.test(date || "")) throw new Error("date must be YYYY-MM-DD");
       if (end && (!day.test(end) || end < date)) throw new Error("end must be YYYY-MM-DD, on or after date");
       const text = String(label || "").trim();
       if (!text || text.length > 120) throw new Error("label: 1–120 characters");
       if (!/^(all|[A-Za-z0-9]{2,12})$/.test(scope)) throw new Error("scope: all or a payer bank code");
-      const list = readJsonFile(ANNOT_FILE, []);
+      if (kind !== "incident" && kind !== "investigation") throw new Error("kind: incident or investigation");
       const a = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, date, end: end || null, label: text, scope: scope === "all" ? "all" : scope.toUpperCase(), at: Date.now() };
+      if (kind === "investigation") {
+        const st = String(status || "").toUpperCase();
+        if (!VERDICT_STATUS.includes(st)) throw new Error(`status: ${VERDICT_STATUS.join(" | ")}`);
+        const conf = confidence ? String(confidence).toUpperCase() : null;
+        if (conf && !VERDICT_CONF.includes(conf)) throw new Error(`confidence: ${VERDICT_CONF.join(" | ")}`);
+        const tk = ticket ? String(ticket).trim().toUpperCase() : null;
+        if (tk && !/^[A-Z][A-Z0-9]+-\d+$/.test(tk)) throw new Error("ticket: a Jira key like TPAP-1234");
+        if (briefId && !/^[A-Za-z0-9._-]{1,80}$/.test(String(briefId))) throw new Error("briefId: letters, digits . _ - only");
+        Object.assign(a, { kind, status: st, confidence: conf, ticket: tk, briefId: briefId || null });
+      }
+      const list = readJsonFile(ANNOT_FILE, []);
       list.push(a);
       writeJsonFile(ANNOT_FILE, list);
       return { annotation: a, annotations: list };
+    })
+  );
+
+  // Investigation brief: the flagged bank's numbers as a markdown file in the Premium workspace
+  // (premium/artifacts/briefs/), the input for `/investigate brief` in Claude Code and for pasting
+  // into Claude chat. The page builds the facts from what it already shows; this only writes the file.
+  const BRIEF_DIR = path.join(process.env.PREMIUM_DIR || path.join(dataDir, "..", "..", "premium"), "artifacts", "briefs");
+  app.post(
+    "/api/udash/brief",
+    handle((req) => {
+      const b = req.body || {};
+      const scope = String(b.scope || "").trim();
+      if (!/^[A-Za-z0-9]{2,12}$/.test(scope)) throw new Error("scope: a payer bank code");
+      const title = String(b.title || "").trim().slice(0, 160);
+      if (!title) throw new Error("title required");
+      const today = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+      const id = `BRIEF-${scope.toUpperCase()}-${today}-${Date.now().toString(36).slice(-4)}`;
+      const sections = (Array.isArray(b.sections) ? b.sections : []).slice(0, 12).map((s) => ({
+        heading: String(s?.heading || "").slice(0, 80),
+        lines: (Array.isArray(s?.lines) ? s.lines : []).slice(0, 40).map((l) => String(l).slice(0, 300)),
+      }));
+      const notes = readJsonFile(ANNOT_FILE, []).filter((n) => n.scope === "all" || n.scope === scope.toUpperCase());
+      const noteLines = notes.slice(-10).map((n) => `- ${n.date}${n.end && n.end !== n.date ? ` → ${n.end}` : ""} · ${n.kind === "investigation" ? `[${n.status}${n.ticket ? ` ${n.ticket}` : ""}] ` : ""}${n.label} (${n.scope})`);
+      const md = [
+        "---",
+        `id: ${id}`,
+        "type: dashboard-brief",
+        "source: Unified SR Dashboard › F · Payer bank deep-dive",
+        `scope: ${scope.toUpperCase()}`,
+        `created: ${today}`,
+        `window_now: ${JSON.stringify(b.windowNow || null)}`,
+        `window_base: ${JSON.stringify(b.windowBase || null)}`,
+        "status: NEW",
+        "---",
+        "",
+        `# ${title}`,
+        "",
+        "Dashboard numbers at the moment of flagging. Treat as the *signal* (observation), not the cause.",
+        "",
+        ...sections.flatMap((s) => [`## ${s.heading}`, "", ...s.lines.map((l) => `- ${l}`), ""]),
+        "## Existing notes for this scope",
+        "",
+        ...(noteLines.length ? noteLines : ["- none"]),
+        "",
+        "## Write the verdict back",
+        "",
+        "```bash",
+        `curl -s -X POST http://localhost:5000/api/udash/annotations -H 'Content-Type: application/json' -d '{"kind":"investigation","date":"${today}","scope":"${scope.toUpperCase()}","status":"CONFIRMED","confidence":"HIGH","ticket":null,"briefId":"${id}","label":"<one-line cause, ≤120 chars>"}'`,
+        "```",
+        "",
+      ].join("\n");
+      fs.mkdirSync(BRIEF_DIR, { recursive: true });
+      fs.writeFileSync(path.join(BRIEF_DIR, `${id}.md`), md);
+      return { id, path: path.join(BRIEF_DIR, `${id}.md`), markdown: md };
     })
   );
   app.delete(

@@ -23,6 +23,7 @@ import { registerUnifiedDashboard } from "./unifiedDashboard.js";
 import { registerUnifiedDrill } from "./unifiedDrill.js";
 import { registerProductDashboard } from "./productDashboard.js";
 import { registerUtilities } from "./utilities.js";
+import { registerSkills } from "./skillRunner.js";
 import { createHistoryStore, registerHistory } from "./historyStore.js";
 import {
   converseBedrock,
@@ -2429,6 +2430,15 @@ app.post("/api/jira/create", async (req, res) => {
       ),
       reqBody
     );
+    const duedate = String(reqBody.duedate || reqBody.dueDate || "").trim();
+    if (duedate) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(duedate)) {
+        return res.status(400).json({ success: false, error: "duedate must be YYYY-MM-DD" });
+      }
+      fieldsBase.duedate = duedate;
+    }
+    const parentKey = String(reqBody.parentKey || reqBody.epicLink || "").trim().toUpperCase();
+    if (parentKey) fieldsBase.parent = { key: parentKey };
     const data = await jiraCreateIssueWithMarkdownDescription(fieldsBase, md, logP, jiraBase);
     const key = data.key || "";
     void sendJiraAgentCreatedEmail({
@@ -3215,12 +3225,16 @@ registerUnifiedDrill(app, { dataDir: path.join(__dirname, "data") });
 
 // Product Wise dashboard (UPI International activation / txns / errors / countries) — /api/product/*
 const productDashboard = registerProductDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
+
+// Utilities → Skills (PRD / BRD / UAT generators saved to History; UMN lookup is not) — /api/utils/skills/*
+const skills = registerSkills(app, { history: dashboardHistory });
 registerHistory(app, {
   history: dashboardHistory,
   rerun: {
     srsnippet: () => srSnippet.rerun(),
     unified: (rec) => unifiedDashboard.rerun(rec.rerun || {}),
     product: (rec) => productDashboard.rerun(rec.rerun || {}),
+    skills: (rec) => skills.rerun(rec),
   },
 });
 registerUtilities(app);

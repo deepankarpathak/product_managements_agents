@@ -3266,6 +3266,10 @@ function BankReport({ result, cfg, handleSel, flowSel, pbankRows = [], live, onR
   const [tab, setTab] = useState("score");
   const [healthSel, setHealthSel] = useState("all");
   const [bank, setBank] = useState(null);
+  // The deep-dive renders above the tables: bring it into view when a bank is picked from a row below.
+  useEffect(() => {
+    if (bank) document.getElementById("udash-bankdeep")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [bank]);
   const [tdType, setTdType] = useState("TD");
   const [spikeCode, setSpikeCode] = useState(null);
   const [detail, setDetail] = useState({}); // bank -> { ranAt, rows }
@@ -3419,6 +3423,7 @@ function BankReport({ result, cfg, handleSel, flowSel, pbankRows = [], live, onR
       )}
 
       {bank && (
+        <div id="udash-bankdeep" style={{ scrollMarginTop: 150 }}>
         <BankDeepDive
           bank={bank}
           name={nameOf(bank)}
@@ -3434,6 +3439,7 @@ function BankReport({ result, cfg, handleSel, flowSel, pbankRows = [], live, onR
           notes={notes.filter((n) => n.scope === bank || n.scope === "all")}
           onEscalate={onEscalate}
         />
+        </div>
       )}
 
       {tab === "score" && (
@@ -4061,9 +4067,12 @@ function BankDeepDive({ bank, name, onClose, scoped, base, etype, detail, win, l
             SR {fmtPct(head.srNow)} vs {fmtPct(head.srBase)} {label.base} ({fmtPp(head.dsr)}) · {fmtNum(head.tNow)} txns · {fmtNum(head.fNow)} failures
           </span>
         )}
+        <span style={{ marginLeft: "auto" }}>
+          <InvestigateBrief bank={bank} name={name} label={label} win={win} head={head} byFlow={byFlow} byHandle={byHandle} types={types} codes={codes} notes={notes} />
+        </span>
         <button
           type="button"
-          style={{ ...btn("primary"), marginLeft: "auto" }}
+          style={btn("primary")}
           onClick={() => onEscalate?.({ dim: bank, code: codes.find((c) => (c.d ?? 0) > 0 && c.ctype !== "BD" && c.k !== "Other codes")?.k || null })}
           title="Draft the escalation email in K, led by this bank's biggest rising non-customer code"
         >
@@ -4077,8 +4086,9 @@ function BankDeepDive({ bank, name, onClose, scoped, base, etype, detail, win, l
         <div style={{ fontSize: 12, color: "#c084fc", margin: "4px 0" }}>
           {notes.map((n) => (
             <div key={n.id}>
-              📝 {n.date}
-              {n.end && n.end !== n.date ? ` → ${n.end}` : ""} · {n.label}
+              {n.kind === "investigation" ? "🔎" : "📝"} {n.date}
+              {n.end && n.end !== n.date ? ` → ${n.end}` : ""} · {n.kind === "investigation" ? `[${n.status}${n.confidence ? ` · ${n.confidence}` : ""}${n.ticket ? ` · ${n.ticket}` : ""}] ` : ""}
+              {n.label}
               {n.scope !== "all" ? ` (${n.scope})` : ""}
             </div>
           ))}
@@ -4104,6 +4114,148 @@ function BankDeepDive({ bank, name, onClose, scoped, base, etype, detail, win, l
         rows (sums to the bank&apos;s Δ SR). Code share = % of the bank&apos;s attempts, so a +0.10pp rise costs 0.10pp of SR.
       </div>
     </div>
+  );
+}
+
+/**
+ * 🔎 Investigate: writes the bank's current numbers as a brief into the Premium workspace
+ * (premium/artifacts/briefs/), offers it for Claude chat (copy) and Claude Code (/investigate brief),
+ * and records the verdict back as an investigation note on this bank.
+ */
+function InvestigateBrief({ bank, name, label, win, head, byFlow, byHandle, types, codes, notes }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [brief, setBrief] = useState(null);
+  const [err, setErr] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [v, setV] = useState({ status: "SUSPECTED", confidence: "MEDIUM", ticket: "", label: "" });
+  const [saved, setSaved] = useState(false);
+
+  const rowLine = (r) => `${r.k}: SR ${fmtPct(r.srNow)} vs ${fmtPct(r.srBase)} (${fmtPp(r.dsr)}), share ${fmtPct(r.share)}, contribution ${r.contrib > 0 ? "+" : ""}${r.contrib.toFixed(3)} pp`;
+  const codeLine = (r) => `${r.k}${r.ctype ? ` (${r.ctype})` : ""}${r.descr ? ` ${String(r.descr).replace(/_/g, " ").slice(0, 50)}` : ""}: ${fmtPct(r.sBase, 3)} → ${fmtPct(r.sNow, 3)} of attempts (${fmtPp(r.d)})`;
+  const build = () => ({
+    scope: bank,
+    title: `${bank}${name ? ` · ${name}` : ""} payer SR ${head ? `${fmtPp(head.dsr)} vs ${label.base}` : "investigation"}`,
+    windowNow: win.now,
+    windowBase: win.base,
+    sections: [
+      {
+        heading: "Headline",
+        lines: head
+          ? [`${label.now} ${win.now[0]} → ${win.now[1]} vs ${label.base} ${win.base[0]} → ${win.base[1]}`, `SR ${fmtPct(head.srNow)} vs ${fmtPct(head.srBase)} (${fmtPp(head.dsr)})`, `${fmtNum(head.tNow)} txns, ${fmtNum(head.fNow)} failures`]
+          : ["No attempts in the current window"],
+      },
+      { heading: "By flow (page's handle filter)", lines: byFlow.slice(0, 6).map(rowLine) },
+      { heading: "By payer handle (page's flow filter)", lines: byHandle.slice(0, 6).map(rowLine) },
+      { heading: "Failure type split (BD / TD / RD, % of attempts)", lines: types.slice(0, 6).map(codeLine) },
+      { heading: "Error codes, top 10 by rise (% of attempts; a +0.10 pp rise costs 0.10 pp of SR)", lines: codes.slice(0, 10).map(codeLine) },
+    ],
+  });
+  const create = async () => {
+    setOpen(true);
+    setBusy(true);
+    setErr(null);
+    setSaved(false);
+    setBrief(null);
+    try {
+      const res = await fetch("/api/udash/brief", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(build()) });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      setBrief(d);
+      setV((x) => ({ ...x, label: "" }));
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const chatText = brief
+    ? `Act as my PM analyst partner using the Premium /investigate method (signal mode, brief variant).\n\nBelow is a dashboard brief for payer bank ${bank}. Treat it as the observed signal, not the cause. Do this: (1) restate the signal in one line, (2) check the listed notes first for an existing explanation, (3) list 3-5 ranked root-cause hypotheses, each with the evidence it needs, what would falsify it, and a Trino SQL query I can run (raw switch.* tables need these filters: dl_last_updated partition, created_on window, business_type IS NULL, type IN ('PAY','COLLECT'), category IN ('VPA2VPA','VPA2ACCOUNT','VPA2MERCHANT'), psp_handle in scope; participants table: participant_type = 'PAYER'), (4) note that BD rises are customer-side and TD/RD rises are the ones to escalate. Do not claim a root cause without query results; I will paste results back.\n\n${brief.markdown}`
+    : "";
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(chatText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setErr("Copy failed: select the text in the box and copy it manually.");
+    }
+  };
+  const save = async () => {
+    setErr(null);
+    try {
+      const body = { kind: "investigation", date: win.now[0], scope: bank, status: v.status, confidence: v.confidence, ticket: v.ticket.trim() || null, briefId: brief?.id || null, label: v.label.trim() };
+      const res = await fetch("/api/udash/annotations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      setSaved(true);
+      window.dispatchEvent(new Event("udash-notes-changed"));
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+  const prior = notes.filter((n) => n.kind === "investigation");
+  return (
+    <>
+      <button type="button" style={{ ...btn(), color: "#c084fc" }} onClick={create} title="Write a brief for this bank and investigate it in Claude Code or Claude chat">
+        🔎 Investigate{prior.length ? ` (${prior.length})` : ""}
+      </button>
+      {open && (
+        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 3000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, width: "min(820px, 100%)", maxHeight: "88vh", overflow: "auto", padding: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+              <b style={{ fontSize: 15 }}>
+                🔎 Investigate {bank}
+                {name ? ` · ${name}` : ""}
+              </b>
+              <button type="button" style={{ ...btn(), marginLeft: "auto" }} onClick={() => setOpen(false)}>
+                Close
+              </button>
+            </div>
+            {busy && <div style={{ color: C.muted, fontSize: 12 }}>Writing brief…</div>}
+            {err && <div style={{ color: C.bad, fontSize: 12, marginBottom: 6 }}>{err}</div>}
+            {brief && (
+              <>
+                <div style={{ fontSize: 12, color: C.text2, marginBottom: 6 }}>
+                  Brief <b>{brief.id}</b> saved to <code>{brief.path}</code>
+                </div>
+                <div style={{ fontSize: 12, marginBottom: 4 }}>
+                  <b>Claude Code:</b> in a terminal run <code>cd ~/prd-agent/premium &amp;&amp; claude</code>, then type <code>/investigate brief {brief.id}</code> (or <code>/investigate brief latest</code>).
+                </div>
+                <div style={{ fontSize: 12, marginBottom: 6 }}>
+                  <b>Claude chat:</b> click Copy, open a new chat, paste. Chat has no Trino access: it proposes hypotheses and SQL, you run the SQL and paste results back.
+                </div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                  <button type="button" style={btn("primary")} onClick={copy}>
+                    {copied ? "Copied ✓" : "Copy for Claude chat"}
+                  </button>
+                </div>
+                <textarea readOnly value={chatText} style={{ ...selectStyle, width: "100%", height: 150, fontFamily: "monospace", fontSize: 11, boxSizing: "border-box" }} />
+                <div style={{ fontSize: 13, fontWeight: 700, margin: "12px 0 4px" }}>Record the verdict</div>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Claude Code writes this itself at the end of /investigate. Use this form for chat investigations or to correct one. It shows on this bank&apos;s deep-dive and in 📝 Notes.</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                  <select style={selectStyle} value={v.status} onChange={(e) => setV((x) => ({ ...x, status: e.target.value }))} aria-label="Status">
+                    {["CONFIRMED", "DISPROVED", "SUSPECTED", "OPEN", "CLOSED-NON-ISSUE"].map((s) => (
+                      <option key={s}>{s}</option>
+                    ))}
+                  </select>
+                  <select style={selectStyle} value={v.confidence} onChange={(e) => setV((x) => ({ ...x, confidence: e.target.value }))} aria-label="Confidence">
+                    {["HIGH", "MEDIUM", "LOW"].map((s) => (
+                      <option key={s}>{s}</option>
+                    ))}
+                  </select>
+                  <input style={{ ...selectStyle, width: 110 }} value={v.ticket} onChange={(e) => setV((x) => ({ ...x, ticket: e.target.value }))} placeholder="TPAP-1234" aria-label="Jira ticket (optional)" />
+                  <input style={{ ...selectStyle, flex: 1, minWidth: 220 }} value={v.label} maxLength={120} onChange={(e) => setV((x) => ({ ...x, label: e.target.value }))} placeholder="One-line cause, e.g. CBS timeouts, TD rise on U30" aria-label="Cause" />
+                  <button type="button" style={btn("primary")} onClick={save} disabled={!v.label.trim() || saved}>
+                    {saved ? "Saved ✓" : "Save verdict"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -4171,7 +4323,12 @@ function NotesManager({ notes, reload }) {
               columns={[
                 { key: "date", label: "Date", align: "left", render: (r) => `${r.date}${r.end && r.end !== r.date ? ` → ${r.end}` : ""}` },
                 { key: "scope", label: "Scope", align: "left" },
-                { key: "label", label: "Note", align: "left" },
+                {
+                  key: "label",
+                  label: "Note",
+                  align: "left",
+                  render: (r) => (r.kind === "investigation" ? `🔎 [${r.status}${r.confidence ? ` · ${r.confidence}` : ""}${r.ticket ? ` · ${r.ticket}` : ""}] ${r.label}` : r.label),
+                },
                 {
                   key: "x",
                   label: "",
@@ -4418,6 +4575,11 @@ export default function UnifiedSrDashboard() {
       .catch(() => {});
   }, []);
   useEffect(() => loadNotes(), [loadNotes]);
+  // The investigation modal (inside the bank deep-dive) saves verdicts and asks the page to refetch.
+  useEffect(() => {
+    window.addEventListener("udash-notes-changed", loadNotes);
+    return () => window.removeEventListener("udash-notes-changed", loadNotes);
+  }, [loadNotes]);
   const [escReq, setEscReq] = useState(null);
   // B · codes for one payee PSP / payer bank: { kind: "psp" | "bank", dim } | null.
   const [bScope, setBScope] = useState(null);

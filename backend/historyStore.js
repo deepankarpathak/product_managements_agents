@@ -26,6 +26,7 @@ export const DASHBOARDS = {
   srsnippet: "Success Rate Snippet",
   product: "Product Wise",
   unified: "Unified SR Dashboard",
+  skills: "Skills (Utilities)",
 };
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -93,6 +94,8 @@ function toMarkdown(rec) {
   if (rec.error) lines.push("", `**Error:** ${mdEscape(rec.error)}`);
   for (const t of a.tables || []) lines.push("", mdTable(t));
   if (rec.sql) lines.push("", "**Query**", "", "```sql", rec.sql, "```");
+  if (rec.notes) lines.push("", "**Notes**", "", rec.notes);
+  if (rec.output) lines.push("", "## Output", "", rec.output);
   lines.push("");
   return lines.join("\n");
 }

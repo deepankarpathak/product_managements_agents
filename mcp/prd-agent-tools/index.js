@@ -394,10 +394,11 @@ server.tool(
     priority: z.string().optional().describe("Priority: Highest, High, Medium, Low, Lowest"),
     assignee: z.string().optional().describe("Assignee email or account ID"),
     labels: z.array(z.string()).optional().describe("Labels to apply"),
-    epicLink: z.string().optional().describe("Epic issue key to link to"),
+    epicLink: z.string().optional().describe("Parent / Epic issue key to link to (sent as Jira parent)"),
+    duedate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Due date YYYY-MM-DD; defaults to today + 7 days"),
     jiraSite: z.string().optional().describe("Jira base URL override"),
   },
-  async ({ projectKey, summary, description, issueType, priority, assignee, labels, epicLink, jiraSite }) => {
+  async ({ projectKey, summary, description, issueType, priority, assignee, labels, epicLink, duedate, jiraSite }) => {
     const up = await portOpen(5000);
     if (!up) return err("Backend not running.");
 
@@ -410,6 +411,7 @@ server.tool(
       assignee,
       labels,
       epicLink,
+      duedate: duedate || new Date(Date.now() + 7 * 864e5).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }),
       jiraSite,
     });
 

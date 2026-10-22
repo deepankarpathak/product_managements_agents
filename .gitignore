@@ -23,6 +23,8 @@
 # misc
 .DS_Store
 .env
+.tmp.driveupload/*
+
 # Cursor IDE — never commit local MCP config, debug logs, or secrets
 .cursor/
 # .claude/ is no longer blanket-ignored — commands/ and skills/ are now
@@ -42,6 +44,7 @@
 *.log
 # Local MCP secrets (never copy into repo)
 **/mcp-secrets.env
+
 
 # aptro/superset-mcp — install with scripts/install-superset-mcp.sh (clone + venv)
 /third_party/superset-mcp/
@@ -73,3 +76,8 @@ JIRA-agent/output/
 
 # Local Jira MCP server (tool code + node_modules, not part of the app)
 mcp/jira-mcp/
+
+# Premium workspace: briefs and local runs stay on this machine
+premium/artifacts/briefs/
+premium/artifacts/data/
+premium/sessions/*.md

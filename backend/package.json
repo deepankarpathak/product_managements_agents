@@ -5,11 +5,11 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node --watch --watch-preserve-output server.js",
+    "dev": "node --watch --watch-preserve-output server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.11"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",

@@ -218,6 +218,12 @@ function Detail({ id, onRerun }) {
         </pre>
       ) : (
         <>
+          {r.output && (
+            <Section title={`Output${r.jira ? ` · ${r.jira.id}` : ""}`}>
+              {r.notes && <div style={{ fontSize: 12, color: C.text2, marginBottom: 8, whiteSpace: "pre-wrap" }}><b>Notes:</b> {r.notes}</div>}
+              <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, color: "#cbd5e1", background: "#020617", border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, maxHeight: 640, overflow: "auto" }}>{r.output}</pre>
+            </Section>
+          )}
           <Section title="Task summary">
             <div style={{ fontSize: 13, color: C.text, lineHeight: 1.5 }}>{a.summary || (ACTIVE.has(r.status) ? `Run is ${r.status.toLowerCase()} — output appears when it finishes.` : "—")}</div>
           </Section>
@@ -411,6 +417,7 @@ export default function DashboardHistory({ active = true }) {
               <option value="unified">Unified SR Dashboard</option>
               <option value="srsnippet">Success Rate Snippet</option>
               <option value="product">Product Wise</option>
+              <option value="skills">Skills (Utilities)</option>
             </select>
           </label>
           <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
