@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Product Wise dashboard — per-product health for Paytm TPAP handles
-// (PTYES, PTAXIS, PTSBI, PTHDFC). UPI International and UPI Plugin (@yesnext, see
-// PluginView); UPI Lite and Mandates later.
+// (PTYES, PTAXIS, PTSBI, PTHDFC). UPI International, UPI Plugin (@yesnext, see
+// PluginView) and UPI Lite (all PSPs, see LiteView); Mandates later.
 // Backend /api/product/* returns raw daily counts for the last 30 complete days; the range
 // (1–15 days), handle filter and the "vs previous period" comparison are all computed here.
 //
@@ -31,7 +31,7 @@ const LOW_SR_PP = 5;
 const PRODUCTS = [
   { id: "international", label: "🌐 UPI International" },
   { id: "plugin", label: "🔌 UPI Plugin" },
-  { id: "lite", label: "⚡ UPI Lite", soon: true },
+  { id: "lite", label: "⚡ UPI Lite" },
   { id: "mandates", label: "🔁 Mandates", soon: true },
 ];
 
@@ -196,14 +196,14 @@ const td = {
  * cols: [{ key, label, title?, align?, render(row) → node, text?(row) → string (for copy), wrap? }]
  * rows: [{ id, ...data, _onClick?, _active?, _total? }]
  */
-function Table({ cols, rows }) {
+function Table({ cols, rows, maxHeight }) {
   return (
-    <div style={{ overflowX: "auto" }}>
+    <div style={{ overflowX: "auto", ...(maxHeight ? { maxHeight, overflowY: "auto" } : {}) }}>
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr>
             {cols.map((c) => (
-              <th key={c.key} style={{ ...th, textAlign: c.align || "right" }} title={c.title}>
+              <th key={c.key} style={{ ...th, textAlign: c.align || "right", ...(maxHeight ? { position: "sticky", top: 0, zIndex: 1 } : {}) }} title={c.title}>
                 {c.label}
               </th>
             ))}
@@ -451,7 +451,7 @@ function JobBadge({ job, cached }) {
   );
 }
 
-function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, onShowSql }) {
+function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, onShowSql, tableMaxHeight }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -487,7 +487,7 @@ function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, o
           {kpis && <div style={{ display: "flex", flexWrap: "wrap", gap: 10, padding: "12px 16px 0" }}>{kpis}</div>}
           {note && <div style={{ padding: "10px 16px 0", fontSize: 12, color: C.text2 }}>{note}</div>}
           {chart}
-          <Table cols={cols} rows={rows} />
+          <Table cols={cols} rows={rows} maxHeight={tableMaxHeight} />
         </>
       ) : (
         <div style={{ padding: 24, color: C.muted, fontSize: 13, textAlign: "center" }}>
@@ -686,6 +686,573 @@ function PluginView({ cached, job, onShowSql }) {
           />
         );
       })}
+    </>
+  );
+}
+
+// ─── UPI Lite ────────────────────────────────────────────────────────────────
+//
+// Daily queries (trend, codes, mandate) cover the last 120 complete days; the trend filter
+// picks how many of those the charts and tables show. Snapshot queries (accounts, autopay,
+// shield) hold one row set per daily run (asOf = run date), so KPIs compare against the
+// previous run. Yesterday = latest day in the data, D-2 = the day before.
+
+const LITE_TRENDS = [4, 7, 15, 30, 60, 90, 120];
+const LITE_DEFAULT_TREND = 30;
+const LITE_ACTIVATION = ["create_mandate_and_activation", "manual_activation"];
+const LITE_TOPUP = ["manual_recurring_topup", "recurring_mandate_execution"];
+const LITE_DEREGISTER = "Deregister Lite";
+const LITE_TOP_CODES = 25;
+const LITE_CHART_TOP = 5;
+const LITE_SPLITS = ["PTYES", "PTAXIS", "PTSBI", "PTHDFC", "PAYTM", "OTHER", "TOTAL"];
+
+/** Snapshot rows → [{ asOf, rows }], oldest first. */
+function snapshotsOf(rows) {
+  const m = new Map();
+  for (const r of rows) {
+    if (!m.has(r.asOf)) m.set(r.asOf, []);
+    m.get(r.asOf).push(r);
+  }
+  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([asOf, rs]) => ({ asOf, rows: rs }));
+}
+
+/**
+ * Share-of-txns breakdown by keyOf(row) over `days`: each key's txn_init as % of the day's
+ * total. SUCCESS is left out of the ranking (it is reported as its own KPI).
+ */
+function shareBreakdown(rows, keyOf, days, limit) {
+  const daySet = new Set(days);
+  const inRange = rows.filter((r) => daySet.has(r.ts));
+  const dayTotal = sumBy(inRange, (r) => r.ts, ["txn_init"]);
+  const byKeyDay = sumBy(inRange, (r) => `${keyOf(r)}|${r.ts}`, ["txn_init"]);
+  const byKey = sumBy(inRange, keyOf, ["txn_init"]);
+  const total = days.reduce((a, d) => a + (dayTotal.get(d)?.txn_init || 0), 0);
+  const y = days[days.length - 1];
+  const d2 = days[days.length - 2];
+  const at = (k, d) => byKeyDay.get(`${k}|${d}`)?.txn_init || 0;
+  const shareAt = (k, d) => (d ? pct(at(k, d), dayTotal.get(d)?.txn_init || 0) : null);
+  const items = [...byKey.entries()]
+    .filter(([k]) => k !== "SUCCESS")
+    .sort((a, b) => b[1].txn_init - a[1].txn_init)
+    .slice(0, limit)
+    .map(([k, v]) => {
+      const share = pct(v.txn_init, total);
+      const ys = shareAt(k, y);
+      return { id: k, key: k, c: v.txn_init, share, y: at(k, y), ys, d2s: shareAt(k, d2), dpp: ys != null && share != null ? ys - share : null, daily: days.map((d) => shareAt(k, d)) };
+    });
+  return { items, total, success: { share: pct(byKey.get("SUCCESS")?.txn_init || 0, total), ys: shareAt("SUCCESS", y) } };
+}
+
+function LiteView({ cache, jobs, onShowSql }) {
+  const [trend, setTrend] = useState(LITE_DEFAULT_TREND);
+  const [errScope, setErrScope] = useState("all");
+  const [typePick, setTypePick] = useState(null);
+  const [codePick, setCodePick] = useState(null);
+  const [catPick, setCatPick] = useState(null);
+  useEffect(() => {
+    setTypePick(null);
+    setCodePick(null);
+    setCatPick(null);
+  }, [trend, errScope]);
+  const toggle = (sel, setSel, defaults, id) => {
+    const base = sel || defaults;
+    setSel(base.includes(id) ? base.filter((x) => x !== id) : [...base, id]);
+  };
+
+  const trendRows = useMemo(() => cache.trend?.rows || [], [cache]);
+  const codeRows = useMemo(() => (cache.codes?.rows || []).filter((r) => errScope === "all" || r.lite), [cache, errScope]);
+  const mandRows = useMemo(() => cache.mandate?.rows || [], [cache]);
+
+  // Trend days: the last `trend` days ending on the latest day present in the daily data.
+  const allDays = useMemo(() => {
+    let first = "";
+    let last = "";
+    for (const q of ["trend", "codes", "mandate"]) {
+      for (const r of cache[q]?.rows || []) {
+        if (r.ts > last) last = r.ts;
+        if (!first || r.ts < first) first = r.ts;
+      }
+    }
+    if (!last) return [];
+    const win = cache.trend?.window || cache.codes?.window || cache.mandate?.window;
+    return daysBetween(win?.fromDate && win.fromDate < first ? win.fromDate : first, toDay(toMs(last) + DAY));
+  }, [cache]);
+  const days = useMemo(() => allDays.slice(-trend), [allDays, trend]);
+  const yd = days[days.length - 1];
+  const d2d = days[days.length - 2];
+  const span = days.length ? `${fmtDay(days[0])} – ${fmtDay(yd)}` : "—";
+
+  // ── Sections 2–6: per-day metrics from the summary table ──
+  const daily = useMemo(() => {
+    const z = { act: 0, actM: 0, top: 0, topM: 0, dereg: 0, liteS: 0, liteI: 0, s: 0, i: 0 };
+    const m = new Map();
+    for (const r of trendRows) {
+      let o = m.get(r.ts);
+      if (!o) m.set(r.ts, (o = { ...z }));
+      if (LITE_ACTIVATION.includes(r.txn_type)) o.act += r.success;
+      if (r.txn_type === "create_mandate_and_activation") o.actM += r.success;
+      if (LITE_TOPUP.includes(r.txn_type)) o.top += r.success;
+      if (r.txn_type === "recurring_mandate_execution") o.topM += r.success;
+      if (r.txn_type === LITE_DEREGISTER) o.dereg += r.success;
+      if (r.lite) {
+        o.liteS += r.success;
+        o.liteI += r.txn_init;
+      }
+      o.s += r.success;
+      o.i += r.txn_init;
+    }
+    const g = (d) => m.get(d) || z;
+    const tot = days.reduce((a, d) => Object.fromEntries(Object.keys(z).map((k) => [k, a[k] + g(d)[k]])), { ...z });
+    const series = (f) => days.map((d) => f(g(d)));
+    return { g, tot, series };
+  }, [trendRows, days]);
+  const { g } = daily;
+  const T = daily.tot;
+  const Y = g(yd);
+  const D2 = g(d2d);
+  const vsD2 = (a, b) => `${fmtSigned(chg(a, b), "%", 0)} vs D-2`;
+  const ppVs = (a, b, what) => (a != null && b != null ? `${fmtSigned(a - b, " pp")} vs ${what}` : undefined);
+  const dayRows = (f) => [...days].reverse().map((d) => ({ id: d, d, ...f(g(d)) }));
+  const dateCol = { key: "d", label: "Date", align: "left", render: (r) => (r._total ? `Range (${days.length}d)` : fmtDay(r.d)), text: (r) => (r._total ? "Range" : r.d) };
+  const countFmt = (v) => (v == null ? "—" : fmtNum(v));
+
+  // ── Section 1 / 9 / 11: snapshots ──
+  const accSnaps = useMemo(() => snapshotsOf(cache.accounts?.rows || []), [cache]);
+  const apSnaps = useMemo(() => snapshotsOf(cache.autopay?.rows || []), [cache]);
+  const shSnaps = useMemo(() => snapshotsOf(cache.shield?.rows || []), [cache]);
+  const lastOf = (s, k = 1) => s[s.length - k]?.rows || [];
+  const accNow = lastOf(accSnaps)[0];
+  const accPrev = lastOf(accSnaps, 2)[0];
+  const apNow = lastOf(apSnaps)[0];
+  const apPrev = lastOf(apSnaps, 2)[0];
+  const shTotal = (rows) => rows.find((r) => r.split === "TOTAL");
+  const shNow = shTotal(lastOf(shSnaps));
+  const shPrev = shTotal(lastOf(shSnaps, 2));
+  const snapDelta = (a, b, what = "prev run") => (a != null && b != null ? `${fmtSigned(a - b, "", 0)} (${fmtSigned(chg(a, b), "%")}) vs ${what}` : "first snapshot");
+  const snapDesc = (s) => (s.length ? `Snapshot as of run ${fmtDay(s[s.length - 1].asOf)} (data up to the day before).` : "");
+
+  // ── Sections 7 / 8: error type and app code share ──
+  const types = useMemo(() => shareBreakdown(codeRows, (r) => r.error_type, days, Infinity), [codeRows, days]);
+  const codes = useMemo(() => shareBreakdown(codeRows, (r) => r.code, days, LITE_TOP_CODES), [codeRows, days]);
+  const typeDefault = types.items.slice(0, LITE_CHART_TOP).map((i) => i.key);
+  const typeSel = typePick || typeDefault;
+  const codeDefault = codes.items.slice(0, LITE_CHART_TOP).map((i) => i.key);
+  const codeSel = codePick || codeDefault;
+  const shareCols = (label, sel) => [
+    { key: "key", label, align: "left", render: (r) => <span>{sel.includes(r.key) && <span style={{ color: SERIES[sel.indexOf(r.key) % SERIES.length] }}>● </span>}<code style={{ fontSize: 12 }}>{r.key}</code></span>, text: (r) => r.key },
+    { key: "c", label: "Txns (range)", title: span, render: (r) => fmtNum(r.c) },
+    { key: "share", label: "% of txns (range)", title: span, render: (r) => fmtPct(r.share, 2) },
+    { key: "y", label: "Yesterday", title: fmtDay(yd), render: (r) => fmtNum(r.y) },
+    { key: "ys", label: "Yesterday %", title: fmtDay(yd), render: (r) => <b>{fmtPct(r.ys, 2)}</b>, text: (r) => fmtPct(r.ys, 2) },
+    { key: "d2s", label: "D-2 %", title: fmtDay(d2d), render: (r) => fmtPct(r.d2s, 2) },
+    { key: "dpp", label: "vs range", title: "Yesterday % − range %, percentage points", render: (r) => <span style={{ color: r.dpp > 0.05 ? C.bad : r.dpp < -0.05 ? C.good : C.text2 }}>{fmtSigned(r.dpp, " pp", 2)}</span>, text: (r) => fmtSigned(r.dpp, " pp", 2) },
+    { key: "daily", label: "Trend", title: `Daily % of txns, ${span}`, render: (r) => <Spark values={r.daily} color={r.dpp > 0.05 ? C.bad : r.dpp < -0.05 ? C.good : "#94a3b8"} />, text: () => "" },
+  ];
+  const shareChart = (bd, sel) => (
+    <TrendChart
+      days={days}
+      lines={sel.map((k, i) => ({ name: k, color: SERIES[i % SERIES.length], values: bd.items.find((x) => x.key === k)?.daily || days.map(() => null) }))}
+      yFmt={(v) => fmtPct(v, 2)}
+    />
+  );
+  const scopePills = (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>Rows</span>
+      {[
+        ["all", "All summary rows"],
+        ["lite", "UPI_LITE payer only"],
+      ].map(([k, l]) => (
+        <button key={k} type="button" onClick={() => setErrScope(k)} style={pill(errScope === k)}>
+          {l}
+        </button>
+      ))}
+    </div>
+  );
+
+  // ── Section 10: mandate creation SR by autopay category ──
+  const mand = useMemo(() => {
+    const daySet = new Set(days);
+    const inRange = mandRows.filter((r) => daySet.has(r.ts));
+    const byCat = sumBy(inRange, (r) => r.category, ["success", "txn_init"]);
+    const byCatDay = sumBy(inRange, (r) => `${r.category}|${r.ts}`, ["success", "txn_init"]);
+    const byDay = sumBy(inRange, (r) => r.ts, ["success", "txn_init"]);
+    const srAt = (c, d) => {
+      const v = byCatDay.get(`${c}|${d}`);
+      return v ? pct(v.success, v.txn_init) : null;
+    };
+    const daySr = (d) => (byDay.get(d) ? pct(byDay.get(d).success, byDay.get(d).txn_init) : null);
+    const z = { success: 0, txn_init: 0 };
+    const items = [...byCat.entries()]
+      .sort((a, b) => b[1].txn_init - a[1].txn_init)
+      .map(([c, v]) => {
+        const sr = pct(v.success, v.txn_init);
+        const yv = byCatDay.get(`${c}|${yd}`) || z;
+        const ysr = pct(yv.success, yv.txn_init);
+        return { id: c, cat: c, ...v, sr, ys: yv.success, ysr, d2sr: srAt(c, d2d), dpp: ysr != null && sr != null ? ysr - sr : null, daily: days.map((d) => srAt(c, d)) };
+      });
+    const all = [...byCat.values()].reduce((a, v) => ({ success: a.success + v.success, txn_init: a.txn_init + v.txn_init }), { ...z });
+    const yAll = byDay.get(yd) || z;
+    const total = { id: "__total", _total: true, cat: "All categories", ...all, sr: pct(all.success, all.txn_init), ys: yAll.success, ysr: pct(yAll.success, yAll.txn_init), d2sr: daySr(d2d), dpp: null };
+    total.dpp = total.ysr != null && total.sr != null ? total.ysr - total.sr : null;
+    return { items, total, srAt, daySr, success: days.map((d) => byDay.get(d)?.success || 0) };
+  }, [mandRows, days, yd, d2d]);
+  const catDefault = mand.items.slice(0, LITE_CHART_TOP).map((i) => i.cat);
+  const catSel = catPick || catDefault;
+
+  const has = (q) => (cache[q]?.rows || []).length > 0;
+  const trendSection = { job: jobs.trend, cached: cache.trend, onShowSql: () => onShowSql("trend"), tableMaxHeight: 420 };
+
+  return (
+    <>
+      <Section
+        n={1}
+        title="UPI Lite active account count"
+        desc={`Distinct LRNs on ACTIVE Lite accounts (lite_account_snapshot_v3) joined to their PMS user. ${snapDesc(accSnaps)} Each daily run adds a snapshot; the table lists them.`}
+        job={jobs.accounts}
+        cached={cache.accounts}
+        onShowSql={() => onShowSql("accounts")}
+        kpis={accNow && <Kpi label="UPI Lite active accounts" value={fmtNum(accNow.active_accounts)} sub={snapDelta(accNow.active_accounts, accPrev?.active_accounts)} color={C.accent} />}
+        chart={accSnaps.length > 1 && <TrendChart days={accSnaps.map((s) => s.asOf)} lines={[{ name: "Active accounts", color: SERIES[0], values: accSnaps.map((s) => s.rows[0]?.active_accounts ?? null) }]} yFmt={countFmt} dots />}
+        cols={[
+          { key: "asOf", label: "Snapshot (run date)", align: "left", render: (r) => fmtDay(r.asOf), text: (r) => r.asOf },
+          { key: "v", label: "Active accounts", render: (r) => <b>{fmtNum(r.v)}</b>, text: (r) => String(r.v) },
+          { key: "dv", label: "Δ vs prev", render: (r) => fmtSigned(r.dv, "", 0), text: (r) => fmtSigned(r.dv, "", 0) },
+        ]}
+        rows={[...accSnaps].reverse().map((s, i, arr) => {
+          const v = s.rows[0]?.active_accounts ?? null;
+          const p = arr[i + 1]?.rows[0]?.active_accounts;
+          return { id: s.asOf, asOf: s.asOf, v, dv: v != null && p != null ? v - p : null };
+        })}
+        tableMaxHeight={300}
+      />
+
+      <div style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>Trend</span>
+        {LITE_TRENDS.map((n) => (
+          <button key={n} type="button" onClick={() => setTrend(n)} style={pill(trend === n)}>
+            {n} days
+          </button>
+        ))}
+        <span style={{ fontSize: 11, color: C.muted, marginLeft: 8 }}>{span} · Yesterday = {fmtDay(yd)}</span>
+      </div>
+
+      <Section
+        n={2}
+        title="UPILite Activation & Recharge (DOD)"
+        desc="Successful txns per day from team_product.upi_lite_summary. Activation = create_mandate_and_activation + manual_activation; Recurring top-ups = manual_recurring_topup + recurring_mandate_execution."
+        {...trendSection}
+        kpis={
+          has("trend") && (
+            <>
+              <Kpi label="Activations yesterday" value={fmtNum(Y.act)} sub={vsD2(Y.act, D2.act)} color={C.accent} />
+              <Kpi label="Top-ups yesterday" value={fmtNum(Y.top)} sub={vsD2(Y.top, D2.top)} />
+              <Kpi label={`Activations · ${days.length}d`} value={fmtNum(T.act)} sub={`${fmtNum(T.act / (days.length || 1))} / day`} />
+              <Kpi label={`Top-ups · ${days.length}d`} value={fmtNum(T.top)} sub={`${fmtNum(T.top / (days.length || 1))} / day`} />
+            </>
+          )
+        }
+        chart={
+          has("trend") && (
+            <TrendChart
+              days={days}
+              lines={[
+                { name: "UPI Lite Activation", color: SERIES[0], values: daily.series((o) => o.act) },
+                { name: "Recurring Top ups", color: SERIES[1], values: daily.series((o) => o.top) },
+              ]}
+              yFmt={countFmt}
+            />
+          )
+        }
+        cols={[
+          dateCol,
+          { key: "act", label: "UPI Lite Activation", render: (r) => fmtNum(r.act) },
+          { key: "top", label: "Recurring Top ups", render: (r) => fmtNum(r.top) },
+        ]}
+        rows={has("trend") ? [...dayRows((o) => ({ act: o.act, top: o.top })), { id: "__total", _total: true, act: T.act, top: T.top }] : []}
+      />
+
+      <Section
+        n={3}
+        title="UPILite Activation & Recharge through Mandate (DOD)"
+        desc="Activation through mandate = create_mandate_and_activation / all activations. Recharge through mandate = recurring_mandate_execution / all recurring top-ups. Range values are pooled (sum ÷ sum)."
+        {...trendSection}
+        kpis={
+          has("trend") && (
+            <>
+              <Kpi label="Activation via mandate · yday" value={fmtPct(pct(Y.actM, Y.act))} sub={ppVs(pct(Y.actM, Y.act), pct(T.actM, T.act), `${days.length}d`)} color={C.accent} />
+              <Kpi label="Recharge via mandate · yday" value={fmtPct(pct(Y.topM, Y.top))} sub={ppVs(pct(Y.topM, Y.top), pct(T.topM, T.top), `${days.length}d`)} />
+              <Kpi label={`Activation via mandate · ${days.length}d`} value={fmtPct(pct(T.actM, T.act))} sub={`${fmtNum(T.actM)} of ${fmtNum(T.act)}`} />
+              <Kpi label={`Recharge via mandate · ${days.length}d`} value={fmtPct(pct(T.topM, T.top))} sub={`${fmtNum(T.topM)} of ${fmtNum(T.top)}`} />
+            </>
+          )
+        }
+        chart={
+          has("trend") && (
+            <TrendChart
+              days={days}
+              lines={[
+                { name: "UPILite Activation through mandate", color: SERIES[0], values: daily.series((o) => pct(o.actM, o.act)) },
+                { name: "UPILite recharge through mandate", color: SERIES[1], values: daily.series((o) => pct(o.topM, o.top)) },
+              ]}
+            />
+          )
+        }
+        cols={[
+          dateCol,
+          { key: "actM", label: "Mandate activations", render: (r) => fmtNum(r.actM) },
+          { key: "act", label: "All activations", render: (r) => fmtNum(r.act) },
+          { key: "actP", label: "Activation via mandate", render: (r) => <b>{fmtPct(pct(r.actM, r.act))}</b>, text: (r) => fmtPct(pct(r.actM, r.act)) },
+          { key: "topM", label: "Mandate recharges", render: (r) => fmtNum(r.topM) },
+          { key: "top", label: "All top-ups", render: (r) => fmtNum(r.top) },
+          { key: "topP", label: "Recharge via mandate", render: (r) => <b>{fmtPct(pct(r.topM, r.top))}</b>, text: (r) => fmtPct(pct(r.topM, r.top)) },
+        ]}
+        rows={has("trend") ? [...dayRows((o) => ({ act: o.act, actM: o.actM, top: o.top, topM: o.topM })), { id: "__total", _total: true, act: T.act, actM: T.actM, top: T.top, topM: T.topM }] : []}
+      />
+
+      <Section
+        n={4}
+        title="Deregister UPILite (DOD)"
+        desc={`Successful '${LITE_DEREGISTER}' txns per day (upi_lite_recharge_txns).`}
+        {...trendSection}
+        kpis={
+          has("trend") && (
+            <>
+              <Kpi label="Deregistered yesterday" value={fmtNum(Y.dereg)} sub={vsD2(Y.dereg, D2.dereg)} color={chg(Y.dereg, D2.dereg) >= TREND_PCT ? C.bad : undefined} />
+              <Kpi label={`Deregistered · ${days.length}d`} value={fmtNum(T.dereg)} sub={`${fmtNum(T.dereg / (days.length || 1))} / day`} />
+              <Kpi label="Deregister per activation" value={fmtPct(pct(T.dereg, T.act))} sub={`${days.length}d, deregistrations ÷ activations`} />
+            </>
+          )
+        }
+        chart={has("trend") && <TrendChart days={days} lines={[{ name: "Deregister UPI Lite", color: SERIES[6], values: daily.series((o) => o.dereg) }]} yFmt={countFmt} />}
+        cols={[dateCol, { key: "dereg", label: "Deregister UPI Lite", render: (r) => fmtNum(r.dereg) }]}
+        rows={has("trend") ? [...dayRows((o) => ({ dereg: o.dereg })), { id: "__total", _total: true, dereg: T.dereg }] : []}
+      />
+
+      <Section
+        n={5}
+        title="UPI Lite transaction share"
+        desc="UPILite txns = successful txns with payer_instrument UPI_LITE. Share = UPILite txns / all successful txns in upi_lite_summary."
+        {...trendSection}
+        kpis={
+          has("trend") && (
+            <>
+              <Kpi label="UPILite txns yesterday" value={fmtNum(Y.liteS)} sub={vsD2(Y.liteS, D2.liteS)} color={C.accent} />
+              <Kpi label="Share yesterday" value={fmtPct(pct(Y.liteS, Y.s), 2)} sub={ppVs(pct(Y.liteS, Y.s), pct(T.liteS, T.s), `${days.length}d`)} />
+              <Kpi label={`UPILite txns · ${days.length}d`} value={fmtNum(T.liteS)} sub={`${fmtNum(T.liteS / (days.length || 1))} / day`} />
+              <Kpi label={`Share · ${days.length}d`} value={fmtPct(pct(T.liteS, T.s), 2)} />
+            </>
+          )
+        }
+        chart={
+          has("trend") && (
+            <TrendChart
+              days={days}
+              lines={[{ name: "Share of total transactions", color: SERIES[0], values: daily.series((o) => pct(o.liteS, o.s)) }]}
+              bars={{ name: "UPILite Txns", values: daily.series((o) => o.liteS) }}
+              yFmt={(v) => fmtPct(v, 2)}
+            />
+          )
+        }
+        cols={[
+          dateCol,
+          { key: "liteS", label: "UPILite Txns", render: (r) => fmtNum(r.liteS) },
+          { key: "s", label: "All successful txns", render: (r) => fmtNum(r.s) },
+          { key: "share", label: "Share of total", render: (r) => <b>{fmtPct(pct(r.liteS, r.s), 2)}</b>, text: (r) => fmtPct(pct(r.liteS, r.s), 2) },
+        ]}
+        rows={has("trend") ? [...dayRows((o) => ({ liteS: o.liteS, s: o.s })), { id: "__total", _total: true, liteS: T.liteS, s: T.s }] : []}
+      />
+
+      <Section
+        n={6}
+        title="UPI Lite Success Rate"
+        desc="UPILite SR = success / txn_init for payer_instrument UPI_LITE. Overall SR = success / txn_init across upi_lite_summary. Red = day UPILite SR more than 5 pp below the range SR."
+        {...trendSection}
+        kpis={
+          has("trend") && (
+            <>
+              <Kpi label="UPILite SR yesterday" value={fmtPct(pct(Y.liteS, Y.liteI), 2)} sub={ppVs(pct(Y.liteS, Y.liteI), pct(T.liteS, T.liteI), `${days.length}d`)} color={C.accent} />
+              <Kpi label="Overall SR yesterday" value={fmtPct(pct(Y.s, Y.i), 2)} sub={ppVs(pct(Y.s, Y.i), pct(T.s, T.i), `${days.length}d`)} />
+              <Kpi label={`UPILite SR · ${days.length}d`} value={fmtPct(pct(T.liteS, T.liteI), 2)} sub={ppVs(pct(T.liteS, T.liteI), pct(T.s, T.i), "overall")} />
+            </>
+          )
+        }
+        chart={
+          has("trend") && (
+            <TrendChart
+              days={days}
+              lines={[
+                { name: "UPILite SR %", color: SERIES[1], values: daily.series((o) => pct(o.liteS, o.liteI)) },
+                { name: "Overall SR %", color: "#e2e8f0", dashed: true, values: daily.series((o) => pct(o.s, o.i)) },
+              ]}
+              yFmt={(v) => fmtPct(v, 2)}
+            />
+          )
+        }
+        cols={[
+          dateCol,
+          { key: "liteI", label: "UPILite init", render: (r) => fmtNum(r.liteI) },
+          { key: "liteS", label: "UPILite success", render: (r) => fmtNum(r.liteS) },
+          {
+            key: "liteSr",
+            label: "UPILite SR %",
+            render: (r) => {
+              const v = pct(r.liteS, r.liteI);
+              const low = !r._total && v != null && v < pct(T.liteS, T.liteI) - LOW_SR_PP;
+              return <b style={{ color: low ? C.bad : C.text }}>{fmtPct(v, 2)}</b>;
+            },
+            text: (r) => fmtPct(pct(r.liteS, r.liteI), 2),
+          },
+          { key: "i", label: "All init", render: (r) => fmtNum(r.i) },
+          { key: "sr", label: "Overall SR %", render: (r) => fmtPct(pct(r.s, r.i), 2) },
+        ]}
+        rows={has("trend") ? [...dayRows((o) => ({ liteS: o.liteS, liteI: o.liteI, s: o.s, i: o.i })), { id: "__total", _total: true, liteS: T.liteS, liteI: T.liteI, s: T.s, i: T.i }] : []}
+      />
+
+      <Section
+        n={7}
+        title="UPI Lite error type"
+        desc={`txn_init by error_type as a % of the day's txn_init (successful rows count as SUCCESS, shown as a KPI). Click a row to add or remove it from the chart. ▲ red = yesterday's share above the range share.`}
+        job={jobs.codes}
+        cached={cache.codes}
+        onShowSql={() => onShowSql("codes")}
+        kpis={
+          has("codes") && (
+            <>
+              <Kpi label="SUCCESS share yesterday" value={fmtPct(types.success.ys, 2)} sub={ppVs(types.success.ys, types.success.share, `${days.length}d`)} color={C.good} />
+              <Kpi label="Top error type" value={types.items[0]?.key || "—"} sub={types.items[0] ? `${fmtPct(types.items[0].share, 2)} of txns · ${days.length}d` : undefined} />
+              <Kpi label="Types up yesterday" value={types.items.filter((i) => i.dpp > 0.05).length} color={C.bad} sub="share above range" />
+            </>
+          )
+        }
+        note={scopePills}
+        chart={has("codes") && shareChart(types, typeSel)}
+        cols={shareCols("Error type", typeSel)}
+        rows={types.items.map((i) => ({ ...i, _active: typeSel.includes(i.key), _onClick: () => toggle(typePick, setTypePick, typeDefault, i.key) }))}
+        tableMaxHeight={420}
+      />
+
+      <Section
+        n={8}
+        title={`UPI Lite error codes (top ${LITE_TOP_CODES})`}
+        desc={`txn_init by app_resp_code as a % of the day's txn_init, ranked by range volume (SUCCESS excluded). Row filter shared with section 7.`}
+        job={jobs.codes}
+        cached={cache.codes}
+        onShowSql={() => onShowSql("codes")}
+        kpis={
+          has("codes") && (
+            <>
+              <Kpi label="Top error code" value={codes.items[0]?.key || "—"} sub={codes.items[0] ? `${fmtPct(codes.items[0].share, 2)} of txns · ${days.length}d` : undefined} />
+              <Kpi label="Codes up yesterday" value={codes.items.filter((i) => i.dpp > 0.05).length} color={C.bad} sub={`of top ${codes.items.length}`} />
+              <Kpi label="Codes down yesterday" value={codes.items.filter((i) => i.dpp < -0.05).length} color={C.good} sub={`of top ${codes.items.length}`} />
+            </>
+          )
+        }
+        note={scopePills}
+        chart={has("codes") && shareChart(codes, codeSel)}
+        cols={shareCols("App resp code", codeSel)}
+        rows={codes.items.map((i) => ({ ...i, _active: codeSel.includes(i.key), _onClick: () => toggle(codePick, setCodePick, codeDefault, i.key) }))}
+        tableMaxHeight={420}
+      />
+
+      <Section
+        n={9}
+        title="UPI Lite Autopay"
+        desc={`Active Lite autopay = distinct UMNs with mandate_status ACTIVE and an LRN (standing_instructions_snapshot_v3). Revoked = customers with a Lite REVOKE; never re-enabled = no CREATE after their first revoke. ${snapDesc(apSnaps)}`}
+        job={jobs.autopay}
+        cached={cache.autopay}
+        onShowSql={() => onShowSql("autopay")}
+        kpis={
+          apNow && (
+            <>
+              <Kpi label="Active Lite Autopay" value={fmtNum(apNow.active)} sub={snapDelta(apNow.active, apPrev?.active)} color={C.accent} />
+              <Kpi label="Users who revoked Lite autopay" value={fmtNum(apNow.revoked)} sub={snapDelta(apNow.revoked, apPrev?.revoked)} />
+              <Kpi label="Revoked, never re-enabled" value={fmtNum(apNow.never_again)} sub={`${fmtPct(pct(apNow.never_again, apNow.revoked))} of revoked users`} color={C.bad} />
+            </>
+          )
+        }
+        cols={[
+          { key: "asOf", label: "Snapshot (run date)", align: "left", render: (r) => fmtDay(r.asOf), text: (r) => r.asOf },
+          { key: "active", label: "Active Lite Autopay", render: (r) => <b>{fmtNum(r.active)}</b>, text: (r) => String(r.active) },
+          { key: "revoked", label: "Users who revoked", render: (r) => fmtNum(r.revoked) },
+          { key: "never", label: "Revoked, never re-enabled", render: (r) => fmtNum(r.never_again) },
+          { key: "neverP", label: "% never re-enabled", render: (r) => fmtPct(pct(r.never_again, r.revoked)) },
+        ]}
+        rows={[...apSnaps].reverse().map((s) => ({ id: s.asOf, asOf: s.asOf, ...s.rows[0] }))}
+        tableMaxHeight={300}
+      />
+
+      <Section
+        n={10}
+        title="UPI Lite Mandate Creation success rate"
+        desc="team_product.lite_autopay_txns by autopay_category. SR = success / txn_init; range SR is pooled. Click a category to add or remove it from the chart."
+        job={jobs.mandate}
+        cached={cache.mandate}
+        onShowSql={() => onShowSql("mandate")}
+        kpis={
+          has("mandate") && (
+            <>
+              <Kpi label="Success txns yesterday" value={fmtNum(mand.total.ys)} color={C.accent} />
+              <Kpi label="SR yesterday" value={fmtPct(mand.total.ysr, 2)} sub={ppVs(mand.total.ysr, mand.total.sr, `${days.length}d`)} />
+              <Kpi label={`Success txns · ${days.length}d`} value={fmtNum(mand.total.success)} sub={`SR ${fmtPct(mand.total.sr, 2)}`} />
+            </>
+          )
+        }
+        chart={
+          has("mandate") && (
+            <TrendChart
+              days={days}
+              lines={[
+                ...catSel.map((c, i) => ({ name: c, color: SERIES[i % SERIES.length], values: days.map((d) => mand.srAt(c, d)) })),
+                { name: "Overall", color: "#e2e8f0", dashed: true, values: days.map((d) => mand.daySr(d)) },
+              ]}
+              bars={{ name: "Success txns", values: mand.success }}
+              yFmt={(v) => fmtPct(v, 2)}
+            />
+          )
+        }
+        cols={[
+          { key: "cat", label: "Autopay category", align: "left", render: (r) => (r._total ? r.cat : <span>{catSel.includes(r.cat) && <span style={{ color: SERIES[catSel.indexOf(r.cat) % SERIES.length] }}>● </span>}{r.cat}</span>), text: (r) => r.cat },
+          { key: "success", label: "Success txns", title: span, render: (r) => fmtNum(r.success) },
+          { key: "txn_init", label: "Initiated", title: span, render: (r) => fmtNum(r.txn_init) },
+          { key: "sr", label: "SR %", title: span, render: (r) => <b>{fmtPct(r.sr, 2)}</b>, text: (r) => fmtPct(r.sr, 2) },
+          { key: "ys", label: "Yesterday success", title: fmtDay(yd), render: (r) => fmtNum(r.ys) },
+          { key: "ysr", label: "Yesterday SR", title: fmtDay(yd), render: (r) => fmtPct(r.ysr, 2) },
+          { key: "d2sr", label: "D-2 SR", title: fmtDay(d2d), render: (r) => fmtPct(r.d2sr, 2) },
+          { key: "dpp", label: "vs range", title: "Yesterday SR − range SR, percentage points", render: (r) => <span style={{ color: r.dpp == null || Math.abs(r.dpp) < 0.05 ? C.text2 : r.dpp > 0 ? C.good : C.bad }}>{fmtSigned(r.dpp, " pp")}</span>, text: (r) => fmtSigned(r.dpp, " pp") },
+          { key: "daily", label: "Trend", title: `Daily SR, ${span}`, render: (r) => (r._total ? "" : <Spark values={r.daily} color="#94a3b8" />), text: () => "" },
+        ]}
+        rows={has("mandate") ? [...mand.items.map((i) => ({ ...i, _active: catSel.includes(i.cat), _onClick: () => toggle(catPick, setCatPick, catDefault, i.cat) })), mand.total] : []}
+      />
+
+      <Section
+        n={11}
+        title="UPI Lite users with Security Shield"
+        desc={`Users with an ACTIVE Lite account (latest status), by PSP, against their latest Security Shield preference (ups preference 44). ${snapDesc(shSnaps)}`}
+        job={jobs.shield}
+        cached={cache.shield}
+        onShowSql={() => onShowSql("shield")}
+        kpis={
+          shNow && (
+            <>
+              <Kpi label="Active Lite users" value={fmtNum(shNow.users)} sub={snapDelta(shNow.users, shPrev?.users)} />
+              <Kpi label="Shield enabled" value={fmtNum(shNow.enabled)} sub={snapDelta(shNow.enabled, shPrev?.enabled)} color={C.accent} />
+              <Kpi label="Enabled %" value={fmtPct(pct(shNow.enabled, shNow.users), 2)} sub={shPrev ? ppVs(pct(shNow.enabled, shNow.users), pct(shPrev.enabled, shPrev.users), "prev run") : undefined} />
+            </>
+          )
+        }
+        cols={[
+          { key: "split", label: "PSP", align: "left", render: (r) => r.split },
+          { key: "users", label: "Active Lite users", render: (r) => fmtNum(r.users) },
+          { key: "enabled", label: "Shield enabled", render: (r) => fmtNum(r.enabled) },
+          { key: "enP", label: "Enabled %", render: (r) => <b>{fmtPct(pct(r.enabled, r.users), 2)}</b>, text: (r) => fmtPct(pct(r.enabled, r.users), 2) },
+          { key: "not", label: "Not enabled", render: (r) => fmtNum(r.not_enabled) },
+          { key: "nopref", label: "No preference record", render: (r) => fmtNum(r.no_pref) },
+          { key: "nocust", label: "No customer id", render: (r) => fmtNum(r.no_cust) },
+        ]}
+        rows={lastOf(shSnaps)
+          .map((r) => ({ ...r, id: r.split, _total: r.split === "TOTAL" }))
+          .sort((a, b) => (LITE_SPLITS.indexOf(a.split) + 1 || 99) - (LITE_SPLITS.indexOf(b.split) + 1 || 99))}
+      />
     </>
   );
 }
@@ -1128,6 +1695,8 @@ export default function ProductDashboard() {
           <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
             {product === "plugin"
               ? "UPI Plugin · @yesnext handle · daily since launch, today included · source PTYBL Redash (PMS, live)"
+              : product === "lite"
+              ? "UPI Lite · all PSPs · last 120 complete days + daily snapshots · source Trino (team_product summaries, tpap_pms / switch / ups snapshots)"
               : `${PRODUCTS.find((p) => p.id === product)?.label.replace(/^\S+\s/, "")} · ${handleLabel} · current ${periodLabel} vs previous ${prevLabel} · source Trino (tpap_pms / switch snapshots)`}
           </div>
         </div>
@@ -1154,7 +1723,7 @@ export default function ProductDashboard() {
             </button>
           ))}
         </div>
-        {product !== "plugin" && (
+        {product === "international" && (
           <>
             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
               <span style={{ fontSize: 11, color: C.muted, marginRight: 4 }}>Range</span>
@@ -1185,12 +1754,15 @@ export default function ProductDashboard() {
         <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
           {product === "plugin"
             ? `Opening this tab only reads cached results (every day since launch, today so far). Backend auto-refreshes ${state.schedule?.join(" & ")}; click Refresh for the latest.`
+            : product === "lite"
+            ? `Opening this tab only reads cached results (last 120 complete days). Backend auto-refreshes daily at ${state.schedule?.join(" & ")} IST; each run also adds a snapshot to sections 1, 9 and 11.`
             : `Opening this tab only reads cached results (last 30 complete days). Backend auto-refreshes daily at ${state.schedule?.join(" & ")} IST. Click a bank / error row to add or remove it from the chart.`}
         </div>
       )}
 
       {product === "plugin" && <PluginView cached={cache.daily} job={jobs.daily} onShowSql={() => showSql("daily")} />}
-      {product !== "plugin" && (
+      {product === "lite" && <LiteView cache={cache} jobs={jobs} onShowSql={showSql} />}
+      {product === "international" && (
         <>
           <Section
             n={1}

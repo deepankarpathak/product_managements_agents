@@ -1,6 +1,7 @@
-// Product Wise dashboard — per-product health (UPI International and UPI Plugin today;
-// UPI Lite and Mandates to follow). International covers Paytm TPAP handles (ptyes,
-// ptaxis, ptsbi, pthdfc); UPI Plugin covers the @yesnext handle (see pluginDashboard.js).
+// Product Wise dashboard — per-product health (UPI International, UPI Plugin and UPI Lite
+// today; Mandates to follow). International covers Paytm TPAP handles (ptyes, ptaxis,
+// ptsbi, pthdfc); UPI Plugin covers the @yesnext handle (see pluginDashboard.js); UPI Lite
+// reads team_product summary tables (no handle split, 120-day window).
 //
 // Each product has a few Trino queries that return raw daily counts grouped by
 // (day, handle, dimension…). The UI slices them by date range (1–15 days) and handle,
@@ -10,6 +11,10 @@
 // A query may define run(ctx) instead of Trino SQL (UPI Plugin: live PMS via Redash, all
 // days since launch including today); such a product may also set refreshEveryMin to be
 // refreshed on an interval instead of once a day.
+//
+// A query marked snapshot: true returns a point-in-time count (no day column). Each run's
+// rows are stamped asOf = window toDate and appended to the cached ones (same asOf
+// replaced), so the UI can show the change between daily snapshots.
 //
 // Routes (all under /api/product):
 //   GET  /state?product=        cached result + job state + schedule
@@ -36,6 +41,46 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const HANDLES = ["ptyes", "ptaxis", "ptsbi", "pthdfc"];
 // tpap_pms.user_snapshot_v3.psp_id → handle (5 = @paytm, excluded).
 const PSP_ID_CASE = `CASE u.psp_id WHEN 6 THEN 'ptyes' WHEN 7 THEN 'ptaxis' WHEN 8 THEN 'pthdfc' WHEN 9 THEN 'ptsbi' END`;
+
+// UPI Lite: trend filter goes up to 120 days; snapshot history kept for the same span.
+const LITE_DAYS = 120;
+const LITE_SNAPSHOTS_KEPT = 120;
+const LITE_SUMMARY_WHERE = `dt >= DATE '{{FROM_DATE}}' AND dt < DATE '{{TO_DATE}}'`;
+// Shared by the three autopay counts (active / revoked / revoked and never re-enabled).
+const LITE_AUTOPAY_SQL = `SELECT active_lite_autopay, users_who_revoked_lite_autopay, users_who_never_activated_again
+FROM (
+  SELECT count(DISTINCT umn) AS active_lite_autopay
+  FROM hive.switch.standing_instructions_snapshot_v3
+  WHERE dl_last_updated IS NOT NULL AND mandate_status = 'ACTIVE' AND lrn IS NOT NULL
+) a
+LEFT JOIN (
+  SELECT count(DISTINCT rev.scope_cust_id) AS users_who_revoked_lite_autopay,
+         count(DISTINCT CASE WHEN act.scope_cust_id IS NULL THEN rev.scope_cust_id END) AS users_who_never_activated_again
+  FROM (
+    SELECT mp.scope_cust_id, min(si.created_on) AS min_revoked
+    FROM (
+      SELECT created_on, txn_id FROM hive.switch.standing_instructions_snapshot_v3
+      WHERE dl_last_updated IS NOT NULL AND lrn IS NOT NULL AND type = 'REVOKE'
+    ) si
+    LEFT JOIN (
+      SELECT scope_cust_id, txn_id FROM hive.switch.standing_instructions_participants_snapshot_v3
+      WHERE dl_last_updated >= DATE '2024-10-01'
+    ) mp ON si.txn_id = mp.txn_id
+    GROUP BY 1
+  ) rev
+  LEFT JOIN (
+    SELECT mp.scope_cust_id, max(si.created_on) AS max_created
+    FROM (
+      SELECT txn_id, created_on FROM hive.switch.standing_instructions_snapshot_v3
+      WHERE dl_last_updated IS NOT NULL AND type = 'CREATE' AND lrn IS NOT NULL
+    ) si
+    LEFT JOIN (
+      SELECT scope_cust_id, txn_id FROM hive.switch.standing_instructions_participants_snapshot_v3
+      WHERE dl_last_updated >= DATE '2024-10-01'
+    ) mp ON si.txn_id = mp.txn_id
+    GROUP BY 1
+  ) act ON rev.scope_cust_id = act.scope_cust_id AND max_created > min_revoked
+) b ON 1 = 1`;
 
 // ─── Products ────────────────────────────────────────────────────────────────
 
@@ -134,6 +179,144 @@ GROUP BY 1, 2, 3, 4, 5, 6`,
         title: "@yesnext onboarding funnel (day)",
         sql: Object.values(PLUGIN_SQL).join("\n\n"),
         run: ({ dataDir, onProgress }) => fetchPluginDaily({ stateFile: path.join(dataDir, "product-plugin-users.json"), onProgress }),
+      },
+    },
+  },
+  lite: {
+    title: "UPI Lite",
+    // Rows carry no PSP handle; keep them all.
+    allHandles: true,
+    window: (nowMs) => {
+      const today = istToday(nowMs);
+      return { fromDate: ymd(new Date(today - LITE_DAYS * 86400000)), toDate: ymd(new Date(today)) };
+    },
+    queries: {
+      // Section 1.
+      accounts: {
+        title: "Lite active accounts (snapshot)",
+        snapshot: true,
+        sql: `SELECT count(DISTINCT lite_acc.lrn) AS active_accounts
+FROM (
+  SELECT customer_id, id, psp_id FROM hive.tpap_pms.user_snapshot_v3
+  WHERE dl_last_updated < CURRENT_DATE
+) u
+JOIN (
+  SELECT acc_ref_id, id, user_id, lrn FROM hive.tpap_pms.lite_account_snapshot_v3
+  WHERE dl_last_updated < CURRENT_DATE AND status = 'ACTIVE'
+) lite_acc ON lite_acc.user_id = u.id`,
+        shape: (r) => ({ active_accounts: num(r.active_accounts) }),
+      },
+      // Sections 2–6: activation / top-up / deregister / txn share / SR all slice this.
+      trend: {
+        title: "Lite summary (day × recharge txn type × Lite payer)",
+        sql: `SELECT
+  CAST(date(dt) AS varchar)                                   AS ts,
+  COALESCE(upi_lite_recharge_txns, '(none)')                  AS txn_type,
+  CASE WHEN payer_instrument = 'UPI_LITE' THEN 1 ELSE 0 END   AS lite,
+  sum(success)                                                AS success,
+  sum(txn_init)                                               AS txn_init
+FROM hive.team_product.upi_lite_summary
+WHERE ${LITE_SUMMARY_WHERE}
+GROUP BY 1, 2, 3`,
+        shape: (r) => ({ ts: String(r.ts).slice(0, 10), txn_type: r.txn_type, lite: num(r.lite), success: num(r.success), txn_init: num(r.txn_init) }),
+      },
+      // Sections 7 and 8. Successful rows count as SUCCESS, as in the reference charts.
+      codes: {
+        title: "Lite error type & app code (day × Lite payer)",
+        sql: `SELECT
+  CAST(date(dt) AS varchar)                                   AS ts,
+  CASE WHEN payer_instrument = 'UPI_LITE' THEN 1 ELSE 0 END   AS lite,
+  CASE WHEN success > 0 THEN 'SUCCESS' ELSE COALESCE(NULLIF(trim(error_type), ''), '(blank)') END     AS error_type,
+  CASE WHEN success > 0 THEN 'SUCCESS' ELSE COALESCE(NULLIF(trim(app_resp_code), ''), '(blank)') END  AS code,
+  sum(txn_init)                                               AS txn_init
+FROM hive.team_product.upi_lite_summary
+WHERE ${LITE_SUMMARY_WHERE}
+GROUP BY 1, 2, 3, 4`,
+        shape: (r) => ({ ts: String(r.ts).slice(0, 10), lite: num(r.lite), error_type: r.error_type, code: r.code, txn_init: num(r.txn_init) }),
+      },
+      // Section 9.
+      autopay: {
+        title: "Lite autopay active / revoked (snapshot)",
+        snapshot: true,
+        sql: LITE_AUTOPAY_SQL,
+        shape: (r) => ({ active: num(r.active_lite_autopay), revoked: num(r.users_who_revoked_lite_autopay), never_again: num(r.users_who_never_activated_again) }),
+      },
+      // Section 10.
+      mandate: {
+        title: "Lite autopay mandate txns (day × category)",
+        sql: `SELECT
+  CAST(date(dt) AS varchar)                    AS ts,
+  COALESCE(autopay_category, '(blank)')        AS category,
+  sum(success)                                 AS success,
+  sum(txn_init)                                AS txn_init
+FROM hive.team_product.lite_autopay_txns
+WHERE ${LITE_SUMMARY_WHERE}
+GROUP BY 1, 2`,
+        shape: (r) => ({ ts: String(r.ts).slice(0, 10), category: r.category, success: num(r.success), txn_init: num(r.txn_init) }),
+      },
+      // Section 11.
+      shield: {
+        title: "Lite users with Security Shield (snapshot × PSP)",
+        snapshot: true,
+        sql: `WITH lite AS (
+  -- active Lite accounts: latest status of each account = ACTIVE, rolled up to the user
+  SELECT user_id
+  FROM (
+    SELECT id, user_id, max_by(status, updated_on) AS st
+    FROM hive.tpap_pms.lite_account_snapshot_v3
+    WHERE dl_last_updated <= CURRENT_DATE
+    GROUP BY id, user_id
+  )
+  WHERE st = 'ACTIVE'
+  GROUP BY user_id
+),
+usr AS (
+  -- user's PSP and Paytm customer id
+  SELECT id, max(psp_id) AS psp_id, max_by(customer_id, updated_on) AS customer_id
+  FROM hive.tpap_pms.user_snapshot_v3
+  WHERE dl_last_updated <= CURRENT_DATE
+  GROUP BY id
+),
+shield AS (
+  -- latest preference 44 = is_security_shield_enabled, per customer
+  SELECT cust_id, preference_value, status
+  FROM (
+    SELECT cust_id, preference_value, status,
+           ROW_NUMBER() OVER (PARTITION BY cust_id ORDER BY dl_last_updated DESC, updated_at DESC, id DESC) AS rn
+    FROM hive.ups.user_preference_snapshot_v3
+    WHERE preference_id = 44
+      AND dl_last_updated >= DATE '2020-01-01'
+  )
+  WHERE rn = 1
+),
+x AS (
+  SELECT CASE u.psp_id WHEN 6 THEN 'PTYES' WHEN 7 THEN 'PTAXIS' WHEN 8 THEN 'PTHDFC'
+                       WHEN 9 THEN 'PTSBI' WHEN 5 THEN 'PAYTM' ELSE 'OTHER' END AS split,
+         l.user_id,
+         CASE WHEN u.customer_id IS NULL THEN 'no_customer_id'
+              WHEN s.cust_id IS NULL THEN 'no_preference_record'
+              WHEN s.status = 'ACTIVE' AND lower(s.preference_value) = 'true' THEN 'enabled'
+              ELSE 'not_enabled' END AS shield
+  FROM lite l
+  LEFT JOIN usr u    ON u.id = l.user_id
+  LEFT JOIN shield s ON s.cust_id = TRY_CAST(u.customer_id AS BIGINT)
+)
+SELECT COALESCE(split, 'TOTAL')                   AS split,
+       COUNT(*)                                   AS active_lite_users,
+       COUNT_IF(shield = 'enabled')               AS shield_enabled,
+       COUNT_IF(shield = 'not_enabled')           AS shield_not_enabled,
+       COUNT_IF(shield = 'no_preference_record')  AS no_preference_record,
+       COUNT_IF(shield = 'no_customer_id')        AS no_customer_id
+FROM x
+GROUP BY ROLLUP (split)`,
+        shape: (r) => ({
+          split: r.split,
+          users: num(r.active_lite_users),
+          enabled: num(r.shield_enabled),
+          not_enabled: num(r.shield_not_enabled),
+          no_pref: num(r.no_preference_record),
+          no_cust: num(r.no_customer_id),
+        }),
       },
     },
   },
@@ -248,7 +431,12 @@ export function registerProductDashboard(app, { dataDir, history = null }) {
           await sleep(RETRY_WAITS_MS[attempt]);
         }
       }
-      const rows = raw.map(SHAPE[query] || ((r) => r)).filter((r) => r.handle);
+      let rows = raw.map(spec.shape || SHAPE[query] || ((r) => r)).filter((r) => def.allHandles || r.handle);
+      if (spec.snapshot) {
+        const kept = (cache[product]?.[query]?.rows || []).filter((r) => r.asOf && r.asOf !== win.toDate);
+        const dates = [...new Set(kept.map((r) => r.asOf))].sort().slice(-(LITE_SNAPSHOTS_KEPT - 1));
+        rows = [...kept.filter((r) => dates.includes(r.asOf)), ...rows.map((r) => ({ ...r, asOf: win.toDate }))];
+      }
       const finishedAt = Date.now();
       cache[product] ||= {};
       cache[product][query] = { rows, window: win, finishedAt, durationMs: finishedAt - startedAt };
