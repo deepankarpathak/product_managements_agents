@@ -12,7 +12,7 @@
 /backend/prd-output
 /backend/agent-exports
 /Query_Agent
-
+/docs/*
 
 # testing
 /coverage

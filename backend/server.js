@@ -23,6 +23,8 @@ import { registerUnifiedDashboard } from "./unifiedDashboard.js";
 import { registerUnifiedDrill } from "./unifiedDrill.js";
 import { registerProductDashboard } from "./productDashboard.js";
 import { registerUtilities } from "./utilities.js";
+import { registerSpecSearch, retrieveSpecContext } from "./specSearch.js";
+import { registerPmHome } from "./pmHome.js";
 import { registerSkills } from "./skillRunner.js";
 import { createHistoryStore, registerHistory } from "./historyStore.js";
 import {
@@ -757,6 +759,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// System-prompt block for NPCI spec excerpts (rag/retrieve.js → specSearch.js).
+function specRagBlock(chunks) {
+  return (
+    "\n\n[Reference context: NPCI UPI TSD V1.0 / UPI Consolidated Circular V1.0 / UPI Error and Response Codes V2.9 excerpts — use where relevant. " +
+    "When a requirement, limit, API field or error code comes from these, cite it inline as (NPCI TSD §x.y, p.N) or " +
+    "(NPCI Circular §x.y, p.N) or (NPCI Error Codes V2.9, p.N). Do not invent NPCI rules or codes that are not in the excerpts.]\n" +
+    chunks.join("\n\n")
+  );
+}
+
 app.post("/api/context/knowledge", async (req, res) => {
   try {
     const q = String(req.body?.q || req.body?.query || "").trim();
@@ -797,10 +809,10 @@ app.post("/api/generate", async (req, res) => {
         prefaceRaw.slice(0, 12000);
     }
     if (!skipRag) {
-      const ragChunks = await ragRetrieve(userText, 5);
+      const ragChunks = await ragRetrieve(userText, 4);
       if (ragChunks.length > 0) {
-        const ragContext = "\n\n[Reference context from NPCI/UPI/PRD docs – use where relevant]\n" + ragChunks.join("\n\n");
-        incomingSystem = (incomingSystem || "") + ragContext;
+        incomingSystem = (incomingSystem || "") + specRagBlock(ragChunks);
+        console.log(`[api/generate] spec RAG: ${ragChunks.length} section(s) — ${ragChunks.map((c) => c.split("\n")[0].replace(/^### /, "")).join(" | ").slice(0, 300)}`);
       }
     }
 
@@ -1136,9 +1148,14 @@ app.post("/api/generate", async (req, res) => {
 app.post("/api/claude", async (req, res) => {
   try {
     const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : null;
-    const incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
+    let incomingSystem = typeof req.body?.system === "string" ? req.body.system : null;
     const incomingMaxTokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 4000;
     const messages = incomingMessages?.length ? incomingMessages : [{ role: "user", content: req.body?.prompt || "" }];
+    if (req.body?.skipRag !== true) {
+      const firstUser = messages.find((m) => m.role === "user")?.content;
+      const ragChunks = await ragRetrieve(typeof firstUser === "string" ? firstUser : JSON.stringify(firstUser || ""), 4);
+      if (ragChunks.length > 0) incomingSystem = (incomingSystem || "") + specRagBlock(ragChunks);
+    }
     const requestedProvider = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase();
     const llmProvider = requestedProvider === "foundry" ? "foundry" : requestedProvider === "anthropic" ? "anthropic" : "aws";
     const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
@@ -1301,6 +1318,15 @@ app.post("/api/alpha/chat", async (req, res) => {
     } catch (e) {
       console.warn("[api/alpha/chat] wiki search error:", e.message);
     }
+    // NPCI TSD / Consolidated Circular excerpts (docs/npci-*) alongside the wiki
+    let specContext = "";
+    try {
+      const spec = retrieveSpecContext(message, { k: 3, maxChars: 4500 });
+      specContext = spec.chunks.join("\n\n---\n\n");
+      filesUsed.push(...spec.refs);
+    } catch (e) {
+      console.warn("[api/alpha/chat] spec search error:", e.message);
+    }
 
     const systemPrompt = [
       "You are Alpha Agent — the embedded PM brain of the Paytm UPI product team.",
@@ -1309,6 +1335,7 @@ app.post("/api/alpha/chat", async (req, res) => {
       products ? `\n[PRODUCTS IN SCOPE]\n${products}` : "",
       index ? `\n[WIKI INDEX]\n${index}` : "",
       wikiContext ? `\n[RELEVANT WIKI CONTEXT]\n${wikiContext}` : "",
+      specContext ? `\n[NPCI SPEC CONTEXT — cite as (NPCI TSD §x, p.N) / (NPCI Circular §x, p.N)]\n${specContext}` : "",
     ].filter(Boolean).join("\n");
 
     const messages = [
@@ -3238,6 +3265,12 @@ registerHistory(app, {
   },
 });
 registerUtilities(app);
+
+// NPCI Spec Search: keyword index over docs/npci-tsd + docs/npci-circular — /api/spec/*
+registerSpecSearch(app);
+
+// PM Console home summary + Jarvis (ai-tools.finmate.tech) agents: HSS, SR Dissection, Success-Rate, Lumina, Txn Tracer — /api/home/*, /api/jarvis/*
+registerPmHome(app, { dataDir: path.join(__dirname, "data") });
 
 // Production: serve frontend build from parent directory (single deploy)
 const buildPath = path.join(__dirname, "..", "build");

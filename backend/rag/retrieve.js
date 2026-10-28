@@ -1,25 +1,26 @@
 /**
- * Smart Context Engine (RAG) – retrieval stub.
+ * Smart Context Engine (RAG) – retrieval for POST /api/generate and /api/claude.
  *
- * When you implement RAG (LangChain + FAISS/Chroma + OpenAI or local embeddings),
- * replace this with real similarity search over NPCI circulars, UPI guidelines,
- * previous PRDs, and merchant docs. See docs/SMART_CONTEXT_ENGINE.md.
+ * Source: the NPCI UPI TSD V1.0, UPI Consolidated Circular V1.0 and Error and Response Codes V2.9
+ * Markdown in docs/npci-tsd, docs/npci-circular and docs/npci-error-codes, via the keyword index in
+ * ../specSearch.js (codes named in the prompt come first as definition rows). Prompts that don't
+ * mention UPI / NPCI vocabulary or a known code get no chunks. Set SPEC_RAG=false to turn it off (callers can also pass
+ * skipRag: true per request).
+ *
+ * Embedding-based search over other docs (previous PRDs, merchant docs) can be layered on later —
+ * see docs/SMART_CONTEXT_ENGINE.md.
  *
  * @param {string} query - User requirement or requirement + feedback text
- * @param {number} [k=5] - Max number of chunks to return
- * @returns {Promise<string[]>} - Array of relevant text chunks (empty if RAG not enabled)
+ * @param {number} [k=4] - Max number of chunks to return
+ * @returns {Promise<string[]>} - Relevant cited excerpts (empty when nothing relevant)
  */
-export async function retrieve(query, k = 5) {
-  if (!query || typeof query !== "string") return [];
+import { retrieveSpecContext } from "../specSearch.js";
 
-  // Stub: no vector store yet. When RAG is implemented:
-  // - Load FAISS/Chroma index from backend/data/ (or backend/rag/)
-  // - Embed query (OpenAI or local), search top-k, return chunk texts
+export async function retrieve(query, k = 4) {
+  if (!query || typeof query !== "string") return [];
+  if (String(process.env.SPEC_RAG || "").toLowerCase() === "false") return [];
   try {
-    // Optional: enable via env so you can turn on RAG when ready
-    if (process.env.RAG_ENABLED !== "true") return [];
-    // Placeholder for real implementation
-    return [];
+    return retrieveSpecContext(query, { k }).chunks;
   } catch (err) {
     console.warn("[RAG] retrieve error:", err.message);
     return [];

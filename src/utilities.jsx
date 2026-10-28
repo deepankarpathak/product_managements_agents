@@ -1,10 +1,11 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getBedrockModelTierForRequest, getLlmDisabledForRequest, getLlmProviderForRequest, getLlmRoutingExtras } from "./ConnectorsStatus.jsx";
 
 // Utilities — ad-hoc lookup tools. Talks to backend /api/utils/*.
 // Each tool runs on demand (nothing runs on page open): Trino lookups, PRD / BRD / UAT
-// generators (/api/utils/skills/run, saved to History), UMN lookup (/api/utils/skills/umn) and
-// merchant details by MID / VPA (/api/utils/merchant).
+// generators (/api/utils/skills/run, saved to History), UMN lookup (/api/utils/skills/umn),
+// merchant details by MID / VPA (/api/utils/merchant) and NPCI Spec Search over the TSD +
+// Consolidated Circular Markdown (/api/spec/*; bookmark as #utilities?spec=<query>).
 
 const API = "/api/utils";
 
@@ -685,6 +686,419 @@ function MerchantLookup({ index }) {
   );
 }
 
+// ─── NPCI Spec Search (TSD + Consolidated Circular) ─────────────────────────
+
+const SPEC_API = "/api/spec";
+const SPEC_SOURCES = [
+  { id: "", label: "All" },
+  { id: "tsd", label: "TSD" },
+  { id: "circular", label: "Circular" },
+  { id: "errcodes", label: "Error codes" },
+];
+const SPEC_EXAMPLES = ["ReqPay", "U16", "Z9", "ReqMandate", "safety switch", "settlement cycle", "check transaction status", "UPI Circle", "P2PM MCC 7407"];
+const SPEC_TINT = { tsd: "#38bdf8", circular: "#f59e0b", errcodes: "#f87171" };
+const SPEC_TAG = { tsd: "TSD", circular: "Circular", errcodes: "Codes" };
+
+async function specApi(pathAndQuery) {
+  const res = await fetch(`${SPEC_API}${pathAndQuery}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Wrap occurrences of `terms` in <mark>. */
+function Highlight({ text, terms }) {
+  if (!terms?.length || !text) return text || null;
+  const re = new RegExp(`(${terms.map(escRe).join("|")})`, "gi");
+  return String(text)
+    .split(re)
+    .map((part, i) =>
+      i % 2 ? (
+        <mark key={i} style={{ background: "#a78bfa44", color: C.text, borderRadius: 2, padding: "0 1px" }}>
+          {part}
+        </mark>
+      ) : (
+        part
+      )
+    );
+}
+
+/** Inline Markdown: **bold**, *italic*, `code`; everything else is text (highlighted). */
+function Inline({ text, terms }) {
+  const out = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*)/g;
+  let last = 0;
+  let m;
+  let k = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(<Highlight key={k++} text={text.slice(last, m.index)} terms={terms} />);
+    const t = m[0];
+    if (t.startsWith("**")) out.push(<strong key={k++}><Highlight text={t.slice(2, -2)} terms={terms} /></strong>);
+    else if (t.startsWith("`")) out.push(<code key={k++} style={{ background: C.card2, padding: "0 4px", borderRadius: 3, fontSize: "0.92em" }}>{t.slice(1, -1)}</code>);
+    else out.push(<em key={k++} style={{ color: C.text2 }}>{t.slice(1, -1)}</em>);
+    last = m.index + t.length;
+  }
+  if (last < text.length) out.push(<Highlight key={k++} text={text.slice(last)} terms={terms} />);
+  return out;
+}
+
+const splitRow = (line) =>
+  line
+    .replace(/^\|/, "")
+    .replace(/\|\s*$/, "")
+    .split(/(?<!\\)\|/)
+    .map((c) => c.trim().replace(/\\\|/g, "|"));
+
+/**
+ * Minimal block renderer for the converted NPCI Markdown: headings, paragraphs, lists, tables,
+ * ```xml fences, images (served from /api/spec/img) and `<!-- p.N -->` page markers (PDF links).
+ */
+function SpecMarkdown({ md, source, terms }) {
+  const lines = md.split("\n");
+  const blocks = [];
+  let i = 0;
+  let key = 0;
+  const pdf = (p) => `${SPEC_API}/pdf/${source}#page=${p}`;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    const page = /^<!-- p\.(\d+) -->$/.exec(line);
+    if (page) {
+      blocks.push(
+        <div key={key++} style={{ display: "flex", alignItems: "center", gap: 8, margin: "14px 0 6px", color: C.muted, fontSize: 10 }}>
+          <span style={{ flex: 1, borderTop: `1px dashed ${C.border}` }} />
+          <a href={pdf(page[1])} target="_blank" rel="noreferrer" style={{ color: C.muted, textDecoration: "none" }} title="Open this page in the source PDF">
+            PDF p.{page[1]} ↗
+          </a>
+        </div>
+      );
+      i++;
+      continue;
+    }
+    if (line.startsWith("```")) {
+      const body = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) body.push(lines[i++]);
+      i++;
+      blocks.push(
+        <pre key={key++} style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, fontSize: 11, lineHeight: 1.45, color: "#c4b5fd", overflowX: "auto", margin: "8px 0" }}>
+          {body.join("\n")}
+        </pre>
+      );
+      continue;
+    }
+    const h = /^(#{1,6}) (.+)$/.exec(line);
+    if (h) {
+      const size = { 1: 16, 2: 15, 3: 14, 4: 13, 5: 13, 6: 12 }[h[1].length];
+      blocks.push(
+        <div key={key++} style={{ fontSize: size, fontWeight: 700, margin: "12px 0 6px", color: C.text }}>
+          <Highlight text={h[2]} terms={terms} />
+        </div>
+      );
+      i++;
+      continue;
+    }
+    const img = /^!\[([^\]]*)\]\(img\/([^)]+)\)$/.exec(line.trim());
+    if (img) {
+      blocks.push(
+        <a key={key++} href={`${SPEC_API}/img/${source}/${img[2]}`} target="_blank" rel="noreferrer" style={{ display: "block", margin: "8px 0" }}>
+          <img src={`${SPEC_API}/img/${source}/${img[2]}`} alt={img[1]} loading="lazy" style={{ maxWidth: "100%", background: "#fff", borderRadius: 6, border: `1px solid ${C.border}` }} />
+        </a>
+      );
+      i++;
+      continue;
+    }
+    if (line.startsWith("|")) {
+      const rows = [];
+      while (i < lines.length && lines[i].startsWith("|")) rows.push(lines[i++]);
+      const [head, , ...body] = rows;
+      const hc = splitRow(head);
+      const tcell = { padding: "5px 8px", borderBottom: `1px solid ${C.border}`, verticalAlign: "top", textAlign: "left" };
+      blocks.push(
+        <div key={key++} style={{ overflowX: "auto", margin: "8px 0", border: `1px solid ${C.border}`, borderRadius: 6 }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 11.5, width: "100%" }}>
+            <thead>
+              <tr>
+                {hc.map((c, j) => (
+                  <th key={j} style={{ ...tcell, background: C.card2, color: C.text2, fontWeight: 600 }}>
+                    <Inline text={c} terms={terms} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {body.map((r, ri) => (
+                <tr key={ri}>
+                  {splitRow(r).map((c, j) => (
+                    <td key={j} style={{ ...tcell, color: C.text }}>
+                      <Inline text={c} terms={terms} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+    if (/^- /.test(line)) {
+      const items = [];
+      while (i < lines.length && /^- /.test(lines[i])) items.push(lines[i++].slice(2));
+      blocks.push(
+        <ul key={key++} style={{ margin: "6px 0", paddingLeft: 20 }}>
+          {items.map((t, j) => (
+            <li key={j} style={{ margin: "2px 0" }}>
+              <Inline text={t} terms={terms} />
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !/^(#{1,6} |\||```|- |<!-- p\.|!\[)/.test(lines[i])) para.push(lines[i++].replace(/^> /, ""));
+    if (!para.length) para.push(lines[i++]);
+    blocks.push(
+      <p key={key++} style={{ margin: "6px 0", lineHeight: 1.55 }}>
+        <Inline text={para.join(" ")} terms={terms} />
+      </p>
+    );
+  }
+  return <div style={{ fontSize: 12.5, color: C.text }}>{blocks}</div>;
+}
+
+const specPages = (r) => (r.page == null ? "" : r.pageTo && r.pageTo !== r.page ? `p.${r.page}–${r.pageTo}` : `p.${r.page}`);
+const specHashQuery = () => {
+  const m = /[?&]spec=([^&]*)/.exec(window.location.hash);
+  return m ? decodeURIComponent(m[1].replace(/\+/g, " ")) : null;
+};
+
+// Prev / Next walk the document from the opened result without leaving it.
+function SpecSection({ id, terms }) {
+  const [cur, setCur] = useState(id);
+  const [sec, setSec] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let live = true;
+    setSec(null);
+    setErr(null);
+    specApi(`/section?id=${encodeURIComponent(cur)}`)
+      .then((d) => live && setSec(d))
+      .catch((e) => live && setErr(e.message));
+    return () => {
+      live = false;
+    };
+  }, [cur]);
+  const onNavigate = setCur;
+  if (err) return <div style={{ color: "#fca5a5", fontSize: 12, padding: 10 }}>{err}</div>;
+  if (!sec) return <div style={{ color: C.muted, fontSize: 12, padding: 10 }}>Loading section…</div>;
+  return (
+    <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 12px 12px", background: "#0d1526" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontSize: 11, color: C.muted }}>{cur === id ? sec.part : [sec.part, ...sec.path, sec.heading].join(" › ")}</span>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button type="button" style={btn()} disabled={!sec.prevId} onClick={() => onNavigate(sec.prevId)}>
+            ← Prev
+          </button>
+          <button type="button" style={btn()} disabled={!sec.nextId} onClick={() => onNavigate(sec.nextId)}>
+            Next →
+          </button>
+          {sec.page != null && (
+            <a href={`${SPEC_API}/pdf/${sec.source}#page=${sec.page}`} target="_blank" rel="noreferrer" style={{ ...btn(), textDecoration: "none" }}>
+              Open PDF {specPages(sec)} ↗
+            </a>
+          )}
+        </span>
+      </div>
+      <div style={{ maxHeight: "70vh", overflow: "auto", paddingRight: 6 }}>
+        <SpecMarkdown md={sec.markdown} source={sec.source} terms={terms} />
+      </div>
+    </div>
+  );
+}
+
+function SpecSearch({ index }) {
+  const [q, setQ] = useState(() => specHashQuery() ?? lsGet("specQ", ""));
+  const [source, setSource] = useState(() => lsGet("specSource", ""));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [result, setResult] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [meta, setMeta] = useState(null);
+
+  const run = async (query = q, src = source) => {
+    const t = query.trim();
+    if (!t) return;
+    lsSet("specQ", t);
+    lsSet("specSource", src);
+    // bookmarkable without triggering the app's hash router (replaceState fires no hashchange)
+    window.history.replaceState(null, "", `#utilities?spec=${encodeURIComponent(t)}`);
+    setBusy(true);
+    setErr(null);
+    setOpenId(null);
+    try {
+      setResult(await specApi(`/search?limit=25&q=${encodeURIComponent(t)}${src ? `&source=${src}` : ""}`));
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    specApi("/sources").then(setMeta).catch(() => {});
+    if (specHashQuery()) run();
+    // tabs stay mounted, so a new #utilities?spec=… link must re-run the search here
+    const onHash = () => {
+      const hq = specHashQuery();
+      if (hq) {
+        setQ(hq);
+        run(hq);
+      }
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const pick = (src) => {
+    setSource(src);
+    if (q.trim()) run(q, src);
+  };
+
+  return (
+    <section style={card}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "baseline", marginBottom: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>{index} · NPCI Spec Search</h2>
+        <span style={{ fontSize: 11, color: C.muted }}>
+          UPI TSD V1.0 + Consolidated Circular V1.0 + Error &amp; Response Codes V2.9
+          {meta ? ` · ${meta.sources.reduce((n, s) => n + s.sections, 0)} sections` : ""} · API names, error codes, clauses
+        </span>
+      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          run();
+        }}
+        style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}
+      >
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="e.g. ReqPay, safety switch, settlement cycle"
+          aria-label="Search NPCI specifications"
+          style={{ ...field, flex: "1 1 320px" }}
+        />
+        <div style={{ display: "flex", border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden" }}>
+          {SPEC_SOURCES.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => pick(s.id)}
+              style={{ padding: "6px 12px", fontSize: 12, border: "none", cursor: "pointer", background: source === s.id ? C.accent : C.card2, color: source === s.id ? "#111" : C.text2, fontWeight: 600 }}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <button type="submit" style={btn("primary")} disabled={busy || !q.trim()}>
+          {busy ? "Searching…" : "Search"}
+        </button>
+        {result && !busy && (
+          <span style={{ fontSize: 11, color: C.muted }}>
+            {result.total} matching sections{result.total > result.results.length ? ` · top ${result.results.length}` : ""} · {result.ms}ms
+          </span>
+        )}
+      </form>
+      {!result && !busy && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+          {SPEC_EXAMPLES.map((ex) => (
+            <button
+              key={ex}
+              type="button"
+              onClick={() => {
+                setQ(ex);
+                run(ex);
+              }}
+              style={{ ...btn(), fontWeight: 500, color: C.text2 }}
+            >
+              {ex}
+            </button>
+          ))}
+        </div>
+      )}
+      {err && <div style={{ color: "#fca5a5", fontSize: 12, marginBottom: 12 }}>{err}</div>}
+      {result?.codes?.length > 0 && (
+        <div style={{ border: `1px solid ${SPEC_TINT.errcodes}66`, borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: SPEC_TINT.errcodes, padding: "6px 10px", background: C.card2 }}>
+            Code definitions · NPCI UPI Error and Response Codes V2.9
+          </div>
+          <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
+            <tbody>
+              {result.codes.flatMap((c) =>
+                c.entries.map((e, j) => (
+                  <tr key={`${c.code}-${j}`} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td style={{ padding: "6px 10px", fontFamily: "ui-monospace, monospace", fontWeight: 700, whiteSpace: "nowrap", verticalAlign: "top" }}>{e.code}</td>
+                    <td style={{ padding: "6px 10px", color: C.text }}>{e.desc}</td>
+                    <td style={{ padding: "6px 10px", color: e.tdbd === "BD" ? "#fbbf24" : e.tdbd === "TD" ? "#60a5fa" : C.muted, fontWeight: 600, whiteSpace: "nowrap" }} title={e.tdbd === "BD" ? "Business decline" : e.tdbd === "TD" ? "Technical decline" : ""}>
+                      {e.tdbd || "—"}
+                    </td>
+                    <td style={{ padding: "6px 10px", color: C.muted, fontSize: 11 }}>{e.section}</td>
+                    <td style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>
+                      <a href={`${SPEC_API}/pdf/errcodes#page=${e.page}`} target="_blank" rel="noreferrer" style={{ color: C.text2, fontSize: 11 }}>
+                        p.{e.page} ↗
+                      </a>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {result && result.results.length === 0 && <div style={{ color: C.muted, fontSize: 12 }}>No sections match “{result.q}”.</div>}
+      {result && result.results.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {result.results.map((r) => {
+            const open = openId === r.id;
+            return (
+              <div key={r.id} style={{ border: `1px solid ${open ? C.accent : C.border}`, borderRadius: 8, background: C.card2, overflow: "hidden" }}>
+                <button
+                  type="button"
+                  onClick={() => setOpenId(open ? null : r.id)}
+                  aria-expanded={open}
+                  style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", color: C.text, padding: "9px 12px", cursor: "pointer" }}
+                >
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4, color: "#111", background: SPEC_TINT[r.source] }}>{SPEC_TAG[r.source]}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>
+                      <Highlight text={r.heading} terms={result.terms} />
+                    </span>
+                    <span style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>
+                      {specPages(r)} {open ? "▴" : "▾"}
+                    </span>
+                  </div>
+                  {r.path.length > 0 && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{r.path.join(" › ")}</div>}
+                  <div style={{ fontSize: 12, color: C.text2, marginTop: 4, lineHeight: 1.5 }}>
+                    <Highlight text={r.snippet} terms={result.terms} />
+                  </div>
+                </button>
+                {open && <SpecSection id={r.id} terms={result.terms} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function Utilities() {
   return (
     <div style={{ minHeight: "100%", background: C.bg, color: C.text, fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
@@ -697,6 +1111,7 @@ export default function Utilities() {
         {SHOW_DOC_GENERATORS && <SkillGenerators />}
         <UmnLookup />
         <MerchantLookup index={SHOW_DOC_GENERATORS ? 4 : 3} />
+        <SpecSearch index={SHOW_DOC_GENERATORS ? 5 : 4} />
       </main>
     </div>
   );

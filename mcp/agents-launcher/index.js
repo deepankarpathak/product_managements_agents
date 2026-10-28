@@ -4,7 +4,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -48,14 +48,14 @@ function appendSpawnBanner(logPath, title) {
   }
 }
 
-function npmDetached(root, npmArgs, logFile) {
+function npmDetached(root, npmArgs, logFile, extraEnv = {}) {
   appendSpawnBanner(logFile, npmArgs.join(" "));
   const logFd = fs.openSync(logFile, "a");
   const child = spawn("npm", npmArgs, {
     cwd: root,
     detached: true,
     stdio: ["ignore", logFd, logFd],
-    env: { ...process.env },
+    env: { ...process.env, ...extraEnv },
   });
   try {
     fs.closeSync(logFd);
@@ -129,6 +129,19 @@ async function startMainStack(root) {
       };
     }
   }
+  // Start only the half that is down. Spawning the full `npm run dev` while one port is held
+  // gives a second stack whose frontend exits on :3000 and whose backend fights over :5000.
+  if (!forceStart()) {
+    const [p3000, p5000] = await Promise.all([portOpen(3000), portOpen(5000)]);
+    if (p3000 && !p5000) {
+      const pid = npmDetached(root, ["run", "start:backend"], logFile);
+      return { ok: true, started: "backend", pid, repoRoot: root, logFile, note: "Port 3000 already up; started backend only." };
+    }
+    if (p5000 && !p3000) {
+      const pid = npmDetached(root, ["start"], logFile, { BROWSER: "none" });
+      return { ok: true, started: "frontend", pid, repoRoot: root, logFile, note: "Port 5000 already up; started frontend only." };
+    }
+  }
   const pid = npmDetached(root, ["run", "dev"], logFile);
   return { ok: true, started: true, pid, repoRoot: root, logFile };
 }
@@ -194,6 +207,13 @@ async function startMcps(root) {
   const results = [];
   for (const srv of MCP_SERVERS) {
     const logFile = path.join(logDir, srv.log);
+    // Every /letsbegin used to spawn another copy of each MCP server.
+    const entry = srv.args[srv.args.length - 1];
+    const running = spawnSync("pgrep", ["-f", entry], { encoding: "utf8" }).stdout.trim();
+    if (running) {
+      results.push({ name: srv.name, started: false, pid: Number(running.split("\n")[0]), logFile, note: "already running" });
+      continue;
+    }
     appendSpawnBanner(logFile, `${srv.cmd} ${srv.args.join(" ")}`);
     const logFd = fs.openSync(logFile, "a");
     const child = spawn(srv.cmd, srv.args, {
