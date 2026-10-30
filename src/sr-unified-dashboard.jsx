@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { mccName } from "./mcc-names.js";
 import { bankHealth, bump, contribution } from "./bank-health.mjs";
 import { DeclinesBody, SR_KINDS, SrKpiStrip } from "./sr-shared.jsx";
 import BreakdownTable from "./breakdown-table.jsx";
@@ -6,7 +7,8 @@ import { buildBreakdown, pickYday } from "./breakdown-math.mjs";
 import { PSP_MODES, PSP_ORDER, pspGroup, pspParent } from "./unified-psp.mjs";
 import { PARTIES, scoreAll } from "./escalation.mjs";
 import { BreakdownFilter, DrillCard, EscalationCard } from "./unified-drill.jsx";
-import { ScoreTable, aggregate, errorCols, errorRows, periodLabels, periods, scoreCols, scoreRows } from "./unified-scorecard.jsx";
+import { NO_PICK, Picker, applyPick, toPick, useStored } from "./table-pickers.jsx";
+import { ScoreTable, aggregate, errorCols, errorRows, lmtdDays, periodLabels, periods, scoreCols, scoreRows } from "./unified-scorecard.jsx";
 
 // Unified SR Dashboard — Morning Dashboard + Success Rate Snippet merged (evaluation build;
 // both old tabs keep running). Talks to backend /api/udash/*. Opening the page only reads
@@ -30,6 +32,11 @@ const SECTION_TITLES = {
   merchants: "G · P2M merchants & MCC (raw, daily)",
   share: "I · Txn Count / % Share Across Handles (DoD)",
 };
+// Default column sets (Columns picker can turn the rest back on; Excel export keeps everything).
+const A_HIDDEN_COLS = ["d2Δ", "d3Δ", "lwΔ", "volΔ", "lost"];
+const B_DAY_HIDDEN_COLS = ["d2", "d3"];
+const B_CODES_HIDDEN_COLS = ["MTD Failures", "LMTD Failures", "Yday Δ%", "LMTD Fails/day"];
+
 const SECTION_IDS = ["breakdown", "declines", "codes", "dims", "raw", "bank", "bankday", "bankrep", "share", "merchants"];
 const INTRADAY_IDS = ["raw"];
 // Refresh-status chips show the text before " · ": keep them distinct where a card has two sections.
@@ -397,6 +404,98 @@ function tickLabel(ts, sameDay) {
 
 // Page-wide incident notes (scope "all"); every LineChart draws them unless given its own marks.
 const MarksCtx = createContext([]);
+
+// ─── layout: collapse / dock / focus per card ────────────────────────────────
+// mode per anchor: "open" (default) · "collapsed" (header + key numbers) · "docked" (only a chip in
+// the dock rail). solo = one card shown alone. Saved in localStorage (udash:layout).
+const LayoutCtx = createContext(null);
+const LAYOUT_CARDS = [
+  ["breakdown", "A · SR Breakdown"],
+  ["declines", "B · Decline codes"],
+  ["sr", "C · SR trend"],
+  ["errors", "D · Error codes"],
+  ["u09", "E · U09"],
+  ["bank", "F · Payer bank"],
+  ["psp", "G · Payee PSP"],
+  ["instrument", "H · Instrument"],
+  ["share", "I · Share"],
+  ["drill", "J · Drill-down"],
+  ["escalate", "K · Escalation"],
+];
+const onlyOpen = (open) => Object.fromEntries(LAYOUT_CARDS.filter(([a]) => !open.includes(a)).map(([a]) => [a, "docked"]));
+const LAYOUT_PRESETS = {
+  focus: { label: "Focus", modes: onlyOpen(["breakdown", "declines", "escalate"]) },
+  bank: { label: "Bank triage", modes: onlyOpen(["breakdown", "declines", "bank", "escalate"]) },
+  full: { label: "Full", modes: {} },
+};
+const presetOf = (layout) => Object.keys(LAYOUT_PRESETS).find((k) => JSON.stringify(LAYOUT_PRESETS[k].modes) === JSON.stringify(layout)) || "custom";
+
+const iconBtn = { ...btnBase(), padding: "3px 8px", fontSize: 12 };
+function btnBase() {
+  return { background: "transparent", border: `1px solid #1e293b`, borderRadius: 6, color: "#94a3b8", cursor: "pointer", fontWeight: 600 };
+}
+
+/** Collapse / dock / focus buttons for a card header. */
+function LayoutButtons({ anchor }) {
+  const lay = useContext(LayoutCtx);
+  if (!lay) return null;
+  const mode = lay.mode(anchor);
+  return (
+    <span style={{ display: "inline-flex", gap: 4 }}>
+      <button type="button" style={iconBtn} onClick={() => lay.set(anchor, mode === "collapsed" ? "open" : "collapsed")} title={mode === "collapsed" ? "Expand" : "Collapse to the header"}>
+        {mode === "collapsed" ? "▸" : "▾"}
+      </button>
+      <button type="button" style={iconBtn} onClick={() => lay.set(anchor, "docked")} title="Dock — move to the side rail (click it there to bring it back)">
+        📌
+      </button>
+      <button type="button" style={{ ...iconBtn, color: lay.solo === anchor ? "#34d399" : iconBtn.color }} onClick={() => lay.setSolo(lay.solo === anchor ? null : anchor)} title={lay.solo === anchor ? "Show all cards" : "Focus — show only this card"}>
+        ⤢
+      </button>
+    </span>
+  );
+}
+
+/** Right-hand rail listing docked cards with their key numbers; click to undock. */
+function DockRail({ docked, summaries, onUndock, open, setOpen, top = 180 }) {
+  if (!docked.length) return null;
+  return (
+    <aside
+      style={{
+        position: "fixed",
+        right: 12,
+        top,
+        zIndex: 15,
+        width: open ? 220 : "auto",
+        maxHeight: `calc(100vh - ${top + 20}px)`,
+        overflow: "auto",
+        background: "#0c1626",
+        border: `1px solid #1e293b`,
+        borderRadius: 8,
+        boxShadow: "0 6px 18px rgba(0,0,0,.4)",
+        padding: open ? 8 : "6px 8px",
+      }}
+    >
+      <button type="button" style={{ ...iconBtn, border: "none", width: "100%", textAlign: "left", color: "#e2e8f0" }} onClick={() => setOpen(!open)} title={open ? "Hide the rail" : "Show docked cards"}>
+        📌 Docked {docked.length} {open ? "›" : "‹"}
+      </button>
+      {open &&
+        docked.map(([a, label]) => (
+          <div
+            key={a}
+            role="button"
+            tabIndex={0}
+            onClick={() => onUndock(a)}
+            onKeyDown={(e) => e.key === "Enter" && onUndock(a)}
+            title="Undock — put the card back on the page and jump to it"
+            style={{ marginTop: 6, padding: "6px 8px", border: `1px solid #1e293b`, borderRadius: 6, cursor: "pointer", background: "#111a2e" }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0" }}>{label}</div>
+            {summaries[a] && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{summaries[a]}</div>}
+          </div>
+        ))}
+    </aside>
+  );
+}
 
 /** marks: optional annotations [{ date: "YYYY-MM-DD", end?, label }] drawn as dashed vertical lines on matching buckets. */
 function LineChart({ title, buckets, series, yFormat = (v) => v.toFixed(1), height = 260, unit = "", initialHidden, marks: ownMarks }) {
@@ -918,6 +1017,8 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
   const active = ACTIVE.has(job?.status);
   const plannedEngine = engineFor(duration, cfg, id);
   const stale = result && result.duration !== duration;
+  const lay = useContext(LayoutCtx);
+  const mode = lay ? lay.mode(anchor) : "open";
 
   const toggleSql = async () => {
     const next = !showSql;
@@ -931,6 +1032,9 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
     }
   };
 
+  if (mode === "docked" || (lay?.solo && lay.solo !== anchor)) return null;
+  const collapsed = mode === "collapsed";
+
   return (
     <section
       id={`udash-${anchor}`}
@@ -938,8 +1042,8 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
         background: C.card,
         border: `1px solid ${C.border}`,
         borderRadius: 10,
-        padding: "20px 24px",
-        marginBottom: 28,
+        padding: collapsed ? "10px 18px" : "16px 20px",
+        marginBottom: collapsed ? 10 : 18,
         scrollMarginTop: 140,
       }}
     >
@@ -949,10 +1053,12 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
           flexWrap: "wrap",
           alignItems: "center",
           gap: 12,
-          marginBottom: 12,
+          marginBottom: collapsed ? 0 : 12,
         }}
       >
-        <h2 style={{ margin: 0, fontSize: 16, color: C.text, fontWeight: 700, letterSpacing: 0.1 }}>{title || SECTION_TITLES[id]}</h2>
+        <LayoutButtons anchor={anchor} />
+        <h2 style={{ margin: 0, fontSize: collapsed ? 14 : 16, color: C.text, fontWeight: 700, letterSpacing: 0.1 }}>{title || SECTION_TITLES[id]}</h2>
+        {collapsed && lay?.summaries?.[anchor] && <span style={{ fontSize: 12, color: C.text2 }}>{lay.summaries[anchor]}</span>}
         <StatusChip job={job} now={now} />
         <EngineBadge engine={active ? job.engine : plannedEngine} />
         <div
@@ -964,6 +1070,7 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
             alignItems: "center",
           }}
         >
+          {!collapsed && (
           <select value={duration} onChange={(e) => setDuration(e.target.value)} style={selectStyle} aria-label="Duration">
             {Object.entries(durationLabels(id)).map(([k, l]) => (
               <option key={k} value={k}>
@@ -971,7 +1078,8 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
               </option>
             ))}
           </select>
-          {!noView && (
+          )}
+          {!noView && !collapsed && (
             <Seg
               value={view}
               onChange={setView}
@@ -981,9 +1089,11 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
               ]}
             />
           )}
-          <button type="button" style={btn()} onClick={toggleSql}>
-            {showSql ? "Hide SQL" : "SQL"}
-          </button>
+          {!collapsed && (
+            <button type="button" style={btn()} onClick={toggleSql}>
+              {showSql ? "Hide SQL" : "SQL"}
+            </button>
+          )}
           {job?.status === "retry-wait" && (
             <button type="button" style={btn()} onClick={onRetryNow}>
               Retry now
@@ -1001,6 +1111,8 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
         </div>
       </div>
 
+      {!collapsed && (
+      <>
       <div
         style={{
           display: "flex",
@@ -1108,6 +1220,8 @@ function SectionCard({ id, anchor = id, title, job, result, cfg, duration, setDu
       )}
 
       {result ? children(view) : null}
+      </>
+      )}
     </section>
   );
 }
@@ -3055,69 +3169,6 @@ function U09PspBody({ result, view, metric, flow = "ALL" }) {
   );
 }
 
-// Common MCCs (ISO 18245) — unknown codes show as the number only.
-const MCC_NAMES = {
-  "0000": "P2P / none",
-  4111: "Local transport",
-  4121: "Taxi / ride-hailing",
-  4131: "Bus lines",
-  4214: "Freight",
-  4215: "Courier",
-  4511: "Airlines",
-  4722: "Travel agencies",
-  4812: "Telecom equipment",
-  4814: "Telecom services",
-  4816: "Network / online services",
-  4899: "Cable / pay TV",
-  4900: "Utilities",
-  5045: "Computers",
-  5137: "Uniforms / clothing (wholesale)",
-  5262: "Online marketplaces",
-  5311: "Department stores",
-  5331: "Variety stores",
-  5399: "General merchandise",
-  5411: "Grocery / supermarkets",
-  5451: "Dairy",
-  5462: "Bakeries",
-  5499: "Food stores (misc)",
-  5541: "Fuel stations",
-  5651: "Family clothing",
-  5691: "Clothing",
-  5732: "Electronics",
-  5812: "Restaurants",
-  5813: "Bars",
-  5814: "Fast food",
-  5815: "Digital media",
-  5816: "Digital games",
-  5817: "Software / apps",
-  5912: "Pharmacies",
-  5944: "Jewellery",
-  5960: "Direct marketing insurance",
-  5977: "Cosmetics",
-  5999: "Misc retail",
-  6012: "Financial institutions",
-  6051: "Quasi-cash / wallets",
-  6211: "Securities / brokers",
-  6300: "Insurance",
-  6540: "Stored value load",
-  7011: "Hotels",
-  7299: "Personal services",
-  7322: "Collection agencies",
-  7372: "IT services",
-  7399: "Business services",
-  7407: "Gaming / betting",
-  7832: "Cinemas",
-  7995: "Betting / lottery",
-  8062: "Hospitals",
-  8099: "Health services",
-  8211: "Schools",
-  8220: "Colleges",
-  8299: "Education services",
-  8398: "Charities",
-  9311: "Tax payments",
-  9399: "Government services",
-};
-const mccName = (m) => MCC_NAMES[m] || MCC_NAMES[Number(m)] || "";
 
 /**
  * Merchants & MCC (raw, yesterday vs the day before, P2M): SR by payee MCC, and the most
@@ -4494,6 +4545,10 @@ const addDay = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).t
 
 /** Card for on-demand tools (not a backend section: no schedule / duration). */
 function ToolCard({ anchor, title, sub, children }) {
+  const lay = useContext(LayoutCtx);
+  const mode = lay ? lay.mode(anchor) : "open";
+  if (mode === "docked" || (lay?.solo && lay.solo !== anchor)) return null;
+  const collapsed = mode === "collapsed";
   return (
     <section
       id={`udash-${anchor}`}
@@ -4501,23 +4556,17 @@ function ToolCard({ anchor, title, sub, children }) {
         background: C.card,
         border: `1px solid ${C.border}`,
         borderRadius: 10,
-        padding: "20px 24px",
-        marginBottom: 28,
+        padding: collapsed ? "10px 18px" : "16px 20px",
+        marginBottom: collapsed ? 10 : 18,
         scrollMarginTop: 140,
       }}
     >
-      <h2
-        style={{
-          margin: "0 0 4px",
-          fontSize: 15,
-          color: C.text,
-          fontWeight: 700,
-        }}
-      >
-        {title}
-      </h2>
-      {sub && <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>{sub}</div>}
-      {children}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: collapsed ? 0 : 4 }}>
+        <LayoutButtons anchor={anchor} />
+        <h2 style={{ margin: 0, fontSize: collapsed ? 14 : 15, color: C.text, fontWeight: 700 }}>{title}</h2>
+      </div>
+      {!collapsed && sub && <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>{sub}</div>}
+      {!collapsed && children}
     </section>
   );
 }
@@ -4551,6 +4600,34 @@ export default function UnifiedSrDashboard() {
   const [pspTop, setPspTop] = useState(true); // G: top 10 + rest
   const [shareBy, setShareBy] = useState("handle"); // I: handle | os | instrument | sub
   const [bankMode, setBankMode] = useState(() => lsGet("bankMode2", "bankrep"));
+  // Card layout: { [anchor]: "collapsed" | "docked" } (absent = open), focus card, dock rail open.
+  const [layout, setLayout] = useState(() => lsGet("layout", {}));
+  const [solo, setSolo] = useState(null);
+  const [railOpen, setRailOpen] = useState(() => lsGet("railOpen", true));
+  useEffect(() => lsSet("layout", layout), [layout]);
+  useEffect(() => lsSet("railOpen", railOpen), [railOpen]);
+  // The dock rail (position: fixed) sits just below the sticky header, whose height changes with the
+  // window width; track the header's bottom edge in the viewport.
+  const [headerH, setHeaderH] = useState(170);
+  const headerRO = useRef(null);
+  const headerRef = useCallback((el) => {
+    headerRO.current?.disconnect();
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => setHeaderH(Math.round(el.getBoundingClientRect().bottom));
+    measure();
+    headerRO.current = new ResizeObserver(measure);
+    headerRO.current.observe(el);
+  }, []);
+  const setMode = useCallback(
+    (anchor, m) =>
+      setLayout((o) => {
+        const n = { ...o };
+        if (m === "open") delete n[anchor];
+        else n[anchor] = m;
+        return n;
+      }),
+    [],
+  );
   const [bankFlow, setBankFlow] = useState("ALL");
   const [bankChart, setBankChart] = useState("watch");
   const [shareMetric, setShareMetric] = useState("share");
@@ -4846,6 +4923,29 @@ export default function UnifiedSrDashboard() {
   // A rows (numbers normalised) + latest complete day; B rows for a payee PSP / payer bank scope.
   const aRows = useMemo(() => (R.breakdown?.rows || []).map((r) => ({ ...r, code: r.code || "", total: Number(r.total) || 0, success: Number(r.success) || 0 })), [R.breakdown]);
   const aYday = useMemo(() => (aRows.length ? pickYday(aRows, { kind: "bank" }) : null), [aRows]);
+  // A · LMTD reference per kind / dim on the page's handle / flow (A itself only holds 10 days):
+  // PSP / instrument / flow from dims, payer bank from the bank report (both span LMTD).
+  // Not shown on a live "More filters" slice — the LMTD sources don't carry its extra filters.
+  const aLmtd = useMemo(() => {
+    if (!aYday || R.breakdown?.slice) return null;
+    const PA = periods(aYday);
+    const days = lmtdDays(PA);
+    const byKind = {};
+    const add = (kind, dim, r) => {
+      if (r.ts < PA.lmtdFrom || r.ts > PA.lmtdTo) return;
+      for (const d of [dim, "__ALL__"]) {
+        const o = ((byKind[kind] ||= {})[d] ||= { total: 0, success: 0 });
+        o.total += Number(r.total) || 0;
+        o.success += Number(r.success) || 0;
+      }
+    };
+    for (const r of R.psp?.rows || []) add("psp", r.psp, r);
+    for (const r of R.instrument?.rows || []) add("instrument", r.instrument, r);
+    for (const r of R.flowDay?.rows || []) add("flow", r.flow, r);
+    for (const r of state?.results?.bankrep?.rows || []) if (r.grp === "base" && inHandle(r.handle, handleSel) && inFlow(r.flow, flowSel)) add("bank", r.bank, r);
+    if (!Object.keys(byKind).length) return null;
+    return { label: periodLabels(PA).lmtd, days, byKind };
+  }, [aYday, R.breakdown, R.psp, R.instrument, R.flowDay, state, handleSel, flowSel]);
   const bankLabelOf = useCallback((kind, dim) => (kind === "bank" ? (cfg?.remitterBanks || []).find((b) => b.code === dim)?.name || null : null), [cfg]);
   // B · its own handle / flow views (the page's views are reused when the keys match).
   const bKey = `${bHandle}|${bFlow}`;
@@ -4895,12 +4995,40 @@ export default function UnifiedSrDashboard() {
     return vol;
   }, [state, bHandle, bFlow]);
   // B · top codes with Yesterday / MTD / LMTD contribution, on B's handle / flow.
+  const [bCodePick, setBCodePick] = useStored("udash-B-codes:rows", NO_PICK);
+  const [bCodeHide, setBCodeHide] = useStored("udash-B-codes:cols", B_CODES_HIDDEN_COLS);
   const bScoreCodes = useMemo(() => {
     if (!P) return null;
     const codeRows = bCodes.map((r) => ({ ...r, dim: r.code }));
     const descr = Object.fromEntries(codeRows.filter((r) => r.descr).map((r) => [r.code, r.descr]));
-    return errorRows(aggregate(codeRows, P), codesTop, descr, "Other codes (long tail)");
-  }, [P, bCodes, codesTop]);
+    return errorRows(aggregate(codeRows, P), codesTop, descr, "Other codes (long tail)", { lmtdDays: lmtdDays(P), pick: bCodePick });
+  }, [P, bCodes, codesTop, bCodePick]);
+  // Key numbers shown on collapsed cards and in the dock rail.
+  const cardSummaries = useMemo(() => {
+    const out = {};
+    const pctOf = (x) => (x?.total > 0 ? `${((x.success * 100) / x.total).toFixed(2)}%` : "—");
+    if (aYday) {
+      const d = { total: 0, success: 0 };
+      for (const r of aRows) {
+        if (r.kind !== "flow" || r.code || r.ts !== aYday) continue;
+        d.total += r.total;
+        d.success += r.success;
+      }
+      const l = aLmtd?.byKind?.flow?.__ALL__;
+      out.breakdown = `SR ${pctOf(d)} on ${aYday.slice(5)}${l ? ` · LMTD ${pctOf(l)}` : ""}`;
+    }
+    if (bScoreCodes?.total) {
+      const top = bScoreCodes.rows[0];
+      const dl = bScoreCodes.total.cells[9];
+      out.declines = `${Math.round(bScoreCodes.total.cells[0]).toLocaleString("en-IN")} fails${dl != null ? ` (${dl > 0 ? "+" : ""}${dl.toFixed(1)}% vs LMTD/day)` : ""}${top ? ` · top ${top.dim}` : ""}`;
+    }
+    const src = { sr: "raw", errors: "raw", u09: "raw", bank: "bankrep", psp: "dims", instrument: "dims", share: "share" };
+    for (const [a, sec] of Object.entries(src)) {
+      const r = state?.results?.[sec];
+      out[a] = r ? `data as of ${fmtTime(r.ranAt)}` : "not run";
+    }
+    return out;
+  }, [aYday, aRows, aLmtd, bScoreCodes, state]);
   const bDeclines = useMemo(
     () => state?.results?.declines && { ...state.results.declines, rows: state.results.declines.rows.filter((r) => inHandle(r.handle, bHandle) && inFlow(r.flow, bFlow)) },
     [state, bHandle, bFlow],
@@ -5107,7 +5235,15 @@ export default function UnifiedSrDashboard() {
     );
   }
 
-  const jumpTo = (id) => document.getElementById(`udash-${ANCHOR_OF[id] || id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  // Undock / expand (and leave focus mode) before scrolling to a card.
+  const jumpTo = (id) => {
+    const anchor = ANCHOR_OF[id] || id;
+    if (layout[anchor]) setMode(anchor, "open");
+    if (solo && solo !== anchor) setSolo(null);
+    setTimeout(() => document.getElementById(`udash-${anchor}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  };
+  const docked = LAYOUT_CARDS.filter(([a]) => layout[a] === "docked");
+  const layoutCtx = { mode: (a) => layout[a] || "open", set: setMode, solo, setSolo, summaries: cardSummaries };
   const failedCount = SECTION_IDS.filter((id) => ["failed", "retry-wait"].includes(state.jobs[id]?.status)).length;
   const common = (id, result = R[id]) => ({
     id,
@@ -5137,6 +5273,7 @@ export default function UnifiedSrDashboard() {
       }}
     >
       <header
+        ref={headerRef}
         style={{
           position: "sticky",
           top: 0,
@@ -5240,6 +5377,16 @@ export default function UnifiedSrDashboard() {
             <Seg value={flowSel} onChange={setFlowSel} options={(state.flowOpts || ["ALL", "P2P", "P2M", "LITE"]).map((f) => [f, f === "ALL" ? "All" : f])} />
             <span style={{ fontSize: 12, color: C.text2 }}>Payee PSP map:</span>
             <Seg value={pspMode} onChange={setPspMode} options={PSP_MODES} />
+            <span style={{ fontSize: 12, color: C.text2 }}>Layout:</span>
+            <Seg
+              value={presetOf(layout)}
+              onChange={(k) => {
+                setLayout(LAYOUT_PRESETS[k].modes);
+                setSolo(null);
+              }}
+              options={Object.entries(LAYOUT_PRESETS).map(([k, p]) => [k, p.label])}
+            />
+            {presetOf(layout) === "custom" && <span style={{ fontSize: 11, color: C.muted }}>custom</span>}
             <span style={{ fontSize: 11, color: C.muted }}>
               Filters apply to day-level cards (A, B, C trend, F day-level, G, H). Morning view = All + @paytm · All. Snippet view = All 4 TPAP · P2M · 4 groups.
             </span>
@@ -5248,11 +5395,22 @@ export default function UnifiedSrDashboard() {
       </header>
 
       <MarksCtx.Provider value={notes.filter((n) => n.scope === "all")}>
-        <main style={{ padding: "28px 32px 48px", maxWidth: 1480, margin: "0 auto", lineHeight: 1.4 }}>
+      <LayoutCtx.Provider value={layoutCtx}>
+        {page === "dash" && <DockRail docked={docked} summaries={cardSummaries} onUndock={jumpTo} open={railOpen} setOpen={setRailOpen} top={headerH + 12} />}
+        <main style={{ padding: `20px ${page === "dash" && docked.length && railOpen ? 248 : 32}px 48px 32px`, maxWidth: 1480, margin: "0 auto", lineHeight: 1.4 }}>
           {page === "config" ? (
             <ConfigPage state={state} now={now} durations={durations} onRun={run} onStop={stop} onRetryNow={retryNow} reload={reload} />
           ) : (
             <>
+              {solo && (
+                <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12, padding: "8px 12px", border: "1px solid #065f46", borderRadius: 8, background: "rgba(52,211,153,0.08)", fontSize: 12 }}>
+                  <b>⤢ Focus: {LAYOUT_CARDS.find(([a]) => a === solo)?.[1]}</b>
+                  <span style={{ color: C.muted }}>other cards hidden</span>
+                  <button type="button" style={{ ...btn(), marginLeft: "auto" }} onClick={() => setSolo(null)}>
+                    ← Show all cards
+                  </button>
+                </div>
+              )}
               <SrKpiStrip
                 state={{
                   ...state,
@@ -5274,7 +5432,8 @@ export default function UnifiedSrDashboard() {
                   ) : (
                     <div style={{ border: `1px solid ${C.border}`, borderRadius: 8 }}>
                       <div style={{ fontSize: 11, color: C.muted, padding: "8px 16px", borderBottom: `1px solid ${C.border}` }}>
-                        Latest complete day <b style={{ color: C.text2 }}>{aYday || "—"}</b> vs D-1…D-3, same weekday last week and L7D average · click a payee PSP / payer bank to see its codes in B,
+                        Latest complete day <b style={{ color: C.text2 }}>{aYday || "—"}</b> vs D-1…D-3, same weekday last week, L7D average
+                        {aLmtd ? ` and LMTD (${aLmtd.label}, vol per day)` : ""} · click a payee PSP / payer bank to see its codes in B,
                         or a decline code to open it in B{R.breakdown?.slice && <span style={{ color: "#38bdf8" }}> · live slice: {R.breakdown.slice}</span>}
                       </div>
                       {aYday ? (
@@ -5285,6 +5444,9 @@ export default function UnifiedSrDashboard() {
                           showKpis={false}
                           labelOf={bankLabelOf}
                           fileTag="unified-breakdown"
+                          lmtd={aLmtd}
+                          pickKey="udash-A"
+                          defaultHiddenCols={A_HIDDEN_COLS}
                           onCodeClick={(code) => {
                             setBScope(null);
                             setDeclineFocus(code);
@@ -5403,6 +5565,8 @@ export default function UnifiedSrDashboard() {
                       key={bScope ? `${bScope.kind}|${bScope.dim}` : "all"}
                       result={bResult || { rows: [] }}
                       amountResult={bScope ? null : bDeclines}
+                      pickKey={bScope ? null : "udash-B-day"}
+                      defaultHiddenCols={B_DAY_HIDDEN_COLS}
                       extraCol={{
                         label: bTopBy === "rise" ? "Top 3 impacted payer banks" : "Top 3 payer banks by failures",
                         title:
@@ -5441,7 +5605,7 @@ export default function UnifiedSrDashboard() {
                         margin: "16px 0 8px",
                       }}
                     >
-                      <b style={{ fontSize: 13 }}>Top error codes and contribution % — Yesterday / MTD / LMTD</b>
+                      <b style={{ fontSize: 13 }}>Top error codes and contribution % — Yesterday / MTD / LMTD · D vs LMTD</b>
                       <Seg
                         value={codesTop}
                         onChange={setCodesTop}
@@ -5458,9 +5622,33 @@ export default function UnifiedSrDashboard() {
                       bScoreCodes && (
                         <ScoreTable
                           firstCol="Error code"
-                          cols={errorCols(per)}
+                          cols={errorCols(per, { dVsLmtd: true })}
                           rows={bScoreCodes.rows}
                           total={bScoreCodes.total}
+                          hide={bCodeHide}
+                          tools={
+                            <>
+                              <Picker
+                                label="Rows"
+                                title={`Add / remove error codes (default: top ${codesTop}; saved in this browser)`}
+                                items={bScoreCodes.options}
+                                visible={applyPick(bScoreCodes.defaults, bCodePick).filter((id) => bScoreCodes.options.some((o) => o.id === id))}
+                                onChange={(ids) => setBCodePick(toPick(bScoreCodes.defaults, ids))}
+                                changed={bCodePick.hidden.length + bCodePick.added.length > 0}
+                                onReset={() => setBCodePick(NO_PICK)}
+                                presets={[5, 10].map((n) => ({ label: `Top ${n}`, ids: bScoreCodes.options.slice(0, n).map((o) => o.id) }))}
+                              />
+                              <Picker
+                                label="Columns"
+                                title="Show / hide columns (Copy keeps only the shown columns)"
+                                items={errorCols(per, { dVsLmtd: true }).map((c) => ({ id: c.label, sub: c.title }))}
+                                visible={errorCols(per, { dVsLmtd: true }).map((c) => c.label).filter((l) => !bCodeHide.includes(l))}
+                                onChange={(ids) => setBCodeHide(errorCols(per, { dVsLmtd: true }).map((c) => c.label).filter((l) => !ids.includes(l)))}
+                                changed={bCodeHide.join() !== B_CODES_HIDDEN_COLS.join()}
+                                onReset={() => setBCodeHide(B_CODES_HIDDEN_COLS)}
+                              />
+                            </>
+                          }
                           caption={`${HANDLE_LABEL[bHandle]} · ${bFlow === "ALL" ? "P2P + P2M + LITE" : bFlow} · Yesterday ${per.y} · MTD ${per.mtd} vs LMTD ${per.lmtd}`}
                         />
                       )
@@ -6005,6 +6193,7 @@ export default function UnifiedSrDashboard() {
             </>
           )}
         </main>
+      </LayoutCtx.Provider>
       </MarksCtx.Provider>
     </div>
   );

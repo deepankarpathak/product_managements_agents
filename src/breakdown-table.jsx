@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ALERT_RULES, buildBreakdown } from "./breakdown-math.mjs";
+import { NO_PICK, Picker, applyPick, toPick, useStored } from "./table-pickers.jsx";
 
 // BreakdownTable — impact-ranked SR triage table (one dimension at a time).
 // Shared by SR Snippet and Morning Dashboard. All math lives in breakdown-math.mjs
@@ -180,12 +181,22 @@ export default function BreakdownTable({
   onClearFocus = null,
   // Optional: make row names clickable — onDimClick(kind, dim). Overall is never clickable.
   onDimClick = null,
+  // Optional: LMTD reference — { label, days, byKind: { [kind]: { [dim | "__ALL__"]: { total, success } } } }.
+  // Adds "SR D vs LMTD" and "Vol D vs LMTD" (D volume vs LMTD daily average) columns.
+  lmtd = null,
+  // Optional: storage key that turns on the Rows / Columns pickers (choices persist per key and tab).
+  pickKey = null,
+  // Columns hidden until the user turns them on in the Columns picker (ids as in COL_IDS).
+  defaultHiddenCols = [],
 }) {
   const [kind, setKind] = useState(kinds[0].id);
   const [metric, setMetric] = useState("sr");
   const [filter, setFilter] = useState("");
   const [alertsOnly, setAlertsOnly] = useState(false);
   const [sort, setSort] = useState({ key: "impact", dir: 1 });
+  const [rowPick, setRowPick] = useStored(pickKey && `${pickKey}:rows:${kind}`, NO_PICK);
+  const [hiddenCols, setHiddenCols] = useStored(pickKey && `${pickKey}:cols`, defaultHiddenCols);
+  const showCol = (id) => !pickKey || !hiddenCols.includes(id);
 
   // Row + alert counts for every tab (cheap: SR metric, same rows).
   const perKind = useMemo(() => {
@@ -215,13 +226,30 @@ export default function BreakdownTable({
   const nameOf = (dim) => (labelOf ? labelOf(kind, dim) : null);
   const isSr = metric === "sr";
   const fmtVal = isSr ? fmtPct : fmtNum;
+  // LMTD SR / daily volume for a row (Overall uses the kind's own total).
+  const withLmtd = (r, isOverall) => {
+    if (!lmtd) return r;
+    const x = lmtd.byKind[kind]?.[isOverall ? "__ALL__" : r.dim];
+    const srLmtd = x && x.total > 0 ? (x.success * 100) / x.total : null;
+    const volLmtd = x && lmtd.days > 0 ? x.total / lmtd.days : null;
+    return {
+      ...r,
+      srLmtd,
+      volLmtd,
+      srΔL: r.srNow != null && srLmtd != null ? r.srNow - srLmtd : null,
+      volΔL: volLmtd > 0 ? ((r.vol - volLmtd) * 100) / volLmtd : null,
+    };
+  };
   const dUnit = isSr ? "pp" : "%";
   const goodUp = metric !== "failure";
 
   const visible = useMemo(() => {
     if (!cur) return [];
     const q = typedCode ? "" : filter.trim().toLowerCase();
+    const keep = pickKey ? new Set(applyPick(cur.rows.map((r) => r.dim), rowPick)) : null;
     const list = cur.rows
+      .filter((r) => !keep || keep.has(r.dim))
+      .map((r) => withLmtd(r, false))
       .map((r) => (focus ? { ...r, ...focusStats(r, focus, cur.days) } : r))
       .filter((r) => !focus || r.focus > 0 || r.focusTrend.some((v) => v > 0))
       .filter((r) => (!alertsOnly || r.alert) && (!q || r.dim.toLowerCase().includes(q) || (nameOf(r.dim) || "").toLowerCase().includes(q) || r.top.some(([c]) => c.toLowerCase().includes(q))));
@@ -235,7 +263,7 @@ export default function BreakdownTable({
       return (typeof x === "string" ? x.localeCompare(y) : x - y) * sort.dir;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cur, filter, alertsOnly, sort, focus, typedCode, labelOf, kind]);
+  }, [cur, filter, alertsOnly, sort, focus, typedCode, labelOf, kind, lmtd, pickKey, rowPick]);
 
   if (!yday || !cur) {
     return <div style={{ padding: 24, color: C.muted, fontSize: 13, textAlign: "center" }}>No breakdown data yet — click Refresh.</div>;
@@ -260,6 +288,12 @@ export default function BreakdownTable({
     })),
     { key: "dsr", label: "Δ SR vs avg", title: "SR now − SR over the 7 days before (L7D), pp" },
     { key: "volΔ", label: "Vol Δ vs avg", title: "Volume now vs L7D daily average, %" },
+    ...(lmtd
+      ? [
+          { key: "srΔL", label: "SR D vs LMTD", title: `SR on ${fmtDay(days.now)} − SR over LMTD (${lmtd.label}), pp; below: D SR · LMTD SR`, sub: "Δ pp · D / LMTD" },
+          { key: "volΔL", label: "Vol D vs LMTD", title: `Volume on ${fmtDay(days.now)} vs LMTD daily average (${lmtd.label}, ${lmtd.days} days), %; below: D vol · LMTD vol/day`, sub: "Δ % · D / LMTD per day" },
+        ]
+      : []),
     { key: "lost", label: "Lost txns", title: "max(0, SR_L7D − SR now) × volume now — failures above normal" },
     { key: "impact", label: "Overall impact", title: "Volume now × (SR now − SR_L7D) ÷ total volume now. Contribution to overall SR change (pp)." },
     ...(focus
@@ -281,6 +315,7 @@ export default function BreakdownTable({
       ...dayCols.flatMap((c) => [`${c.label} (${c.day})`, `${c.label} Δ now (${dUnit})`]),
       "Δ SR vs avg (pp)",
       "Vol Δ vs avg (%)",
+      ...(lmtd ? ["SR D (%)", "SR LMTD (%)", "SR D vs LMTD (pp)", "Vol D", "Vol LMTD / day", "Vol D vs LMTD (%)"] : []),
       "Lost txns",
       "Overall impact (pp)",
       ...(focus ? days.trend.map((d) => `${focus} ${d}`) : []),
@@ -294,6 +329,7 @@ export default function BreakdownTable({
         ...dayCols.flatMap((c) => [r[c.key]?.toFixed(isSr ? 2 : 0), r[`${c.key}Δ`]?.toFixed(2)]),
         r.dsr?.toFixed(2),
         r.volΔ?.toFixed(1),
+        ...(lmtd ? [r.srNow?.toFixed(2), r.srLmtd?.toFixed(2), r.srΔL?.toFixed(2), r.vol, r.volLmtd != null ? Math.round(r.volLmtd) : "", r.volΔL?.toFixed(1)] : []),
         r.lost != null ? Math.round(r.lost) : "",
         r.impact?.toFixed(3),
         ...(focus ? focusStats(r, focus, days).focusTrend : []),
@@ -302,7 +338,7 @@ export default function BreakdownTable({
       ]
         .map(csvCell)
         .join(",");
-    const csv = [head.map(csvCell).join(","), ...visible.map(line), line(overall)].join("\n");
+    const csv = [head.map(csvCell).join(","), ...visible.map(line), line(withLmtd(overall, true))].join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
     a.download = `${fileTag}-${kind}-${metric}-${days.now}.csv`;
@@ -315,7 +351,8 @@ export default function BreakdownTable({
   const warnCount = cur.rows.filter((r) => r.alert === "WARN").length;
 
   const renderRow = (r0, isOverall) => {
-    const r = isOverall && focus ? { ...r0, ...focusStats(r0, focus, days) } : r0;
+    const r1 = isOverall ? withLmtd(r0, true) : r0;
+    const r = isOverall && focus ? { ...r1, ...focusStats(r1, focus, days) } : r1;
     const bg = isOverall ? C.card2 : r.alert === "CRIT" ? C.rowCrit : r.alert === "WARN" ? C.rowWarn : undefined;
     const stickyBg = isOverall ? C.card2 : C.card;
     return (
@@ -356,8 +393,8 @@ export default function BreakdownTable({
           {nameOf(r.dim) && <span style={{ fontSize: 11, color: C.text2, fontWeight: 400 }}> · {nameOf(r.dim)}</span>}
           <div style={{ fontSize: 11, color: C.muted, fontWeight: 400 }}>{fmtNum(r.vol)} txns</div>
         </td>
-        <td style={{ ...td, color: C.text, fontWeight: 700 }}>{fmtVal(r.now)}</td>
-        {dayCols.map((c) => {
+        {showCol("now") && <td style={{ ...td, color: C.text, fontWeight: 700 }}>{fmtVal(r.now)}</td>}
+        {dayCols.filter((c) => showCol(`${c.key}Δ`)).map((c) => {
           const d = r[`${c.key}Δ`];
           return (
             <td key={c.key} style={td}>
@@ -366,10 +403,30 @@ export default function BreakdownTable({
             </td>
           );
         })}
-        <td style={{ ...td, color: toneOf(r.dsr, true), fontWeight: 600 }}>{fmtSigned(r.dsr, "pp")}</td>
-        <td style={{ ...td, color: C.text2 }}>{fmtSigned(r.volΔ, "%", 1)}</td>
-        <td style={{ ...td, color: r.lost > 0 ? C.text : C.muted }}>{r.lost > 0.5 ? fmtNum(r.lost) : "—"}</td>
-        <td style={{ ...td, color: toneOf(r.impact, true, 0.0005), fontWeight: 600 }}>{fmtSigned(r.impact, "pp", 3)}</td>
+        {showCol("dsr") && <td style={{ ...td, color: toneOf(r.dsr, true), fontWeight: 600 }}>{fmtSigned(r.dsr, "pp")}</td>}
+        {showCol("volΔ") && <td style={{ ...td, color: C.text2 }}>{fmtSigned(r.volΔ, "%", 1)}</td>}
+        {lmtd && (
+          <>
+            {showCol("srΔL") && (
+            <td style={{ ...td, color: toneOf(r.srΔL, true), fontWeight: 600 }}>
+              {fmtSigned(r.srΔL, "pp")}
+              <div style={{ fontSize: 11, color: C.muted, fontWeight: 400 }}>
+                {fmtPct(r.srNow)} · {fmtPct(r.srLmtd)}
+              </div>
+            </td>
+            )}
+            {showCol("volΔL") && (
+            <td style={{ ...td, color: toneOf(r.volΔL, true, 0.05) }}>
+              {fmtSigned(r.volΔL, "%", 1)}
+              <div style={{ fontSize: 11, color: C.muted }}>
+                {fmtNum(r.vol)} · {fmtNum(r.volLmtd)}
+              </div>
+            </td>
+            )}
+          </>
+        )}
+        {showCol("lost") && <td style={{ ...td, color: r.lost > 0 ? C.text : C.muted }}>{r.lost > 0.5 ? fmtNum(r.lost) : "—"}</td>}
+        {showCol("impact") && <td style={{ ...td, color: toneOf(r.impact, true, 0.0005), fontWeight: 600 }}>{fmtSigned(r.impact, "pp", 3)}</td>}
         {focus && (
           <>
             <td style={{ ...td, color: C.warn, fontWeight: 600 }}>
@@ -388,6 +445,7 @@ export default function BreakdownTable({
             </td>
           </>
         )}
+        {showCol("top") && (
         <td style={{ ...td, textAlign: "left", fontSize: 12, color: C.text2 }}>
           {r.top.length ? (
             r.top.map(([code, n], i) => (
@@ -407,9 +465,12 @@ export default function BreakdownTable({
             <span style={{ color: C.muted }}>—</span>
           )}
         </td>
-        <td style={{ ...td, textAlign: "center" }}>
-          <Badge level={r.alert} />
-        </td>
+        )}
+        {showCol("alert") && (
+          <td style={{ ...td, textAlign: "center" }}>
+            <Badge level={r.alert} />
+          </td>
+        )}
       </tr>
     );
   };
@@ -478,6 +539,29 @@ export default function BreakdownTable({
           <input type="checkbox" checked={alertsOnly} onChange={(e) => setAlertsOnly(e.target.checked)} />
           Alerts only
         </label>
+        {pickKey && (
+          <>
+            <Picker
+              label="Rows"
+              title="Add / remove rows in this tab (saved in this browser)"
+              items={[...cur.rows].sort((a, b) => b.vol - a.vol).map((r) => ({ id: r.dim, label: nameOf(r.dim) ? `${r.dim} · ${nameOf(r.dim)}` : r.dim, sub: `${fmtNum(r.vol)} txns · SR ${fmtPct(r.srNow)}` }))}
+              visible={applyPick(cur.rows.map((r) => r.dim), rowPick)}
+              onChange={(ids) => setRowPick(toPick(cur.rows.map((r) => r.dim), ids))}
+              changed={rowPick.hidden.length > 0}
+              onReset={() => setRowPick(NO_PICK)}
+              presets={[5, 10, 20].map((n) => ({ label: `Top ${n} vol`, ids: [...cur.rows].sort((a, b) => b.vol - a.vol).slice(0, n).map((r) => r.dim) })).concat([{ label: "Alerts", ids: cur.rows.filter((r) => r.alert).map((r) => r.dim) }])}
+            />
+            <Picker
+              label="Columns"
+              title="Show / hide columns (Excel export keeps every column)"
+              items={[...cols.filter((c) => !c.key.startsWith("focus")).map((c) => ({ id: c.key, label: c.label, sub: c.title })), { id: "top", label: "Top decline codes" }, { id: "alert", label: "Alert badge" }]}
+              visible={[...cols.map((c) => c.key), "top", "alert"].filter((k) => !k.startsWith("focus") && showCol(k))}
+              onChange={(ids) => setHiddenCols([...cols.map((c) => c.key), "top", "alert"].filter((k) => !k.startsWith("focus") && !ids.includes(k)))}
+              changed={hiddenCols.join() !== defaultHiddenCols.join()}
+              onReset={() => setHiddenCols(defaultHiddenCols)}
+            />
+          </>
+        )}
         <button type="button" style={pill(false)} onClick={exportCsv} title="Download visible rows as CSV (opens in Excel)">
           ⬇ Excel
         </button>
@@ -493,17 +577,19 @@ export default function BreakdownTable({
                 {kinds.find((k) => k.id === kind)?.label}
                 {arrow("dim")}
               </th>
-              {cols.map((c) => (
+              {cols.filter((c) => showCol(c.key)).map((c) => (
                 <th key={c.key} style={th} title={c.title} onClick={() => toggleSort(c.key)}>
                   {c.label}
                   {arrow(c.key)}
                   {c.sub && <div style={{ fontSize: 9, color: C.muted, fontWeight: 500, textTransform: "none" }}>{c.sub}</div>}
                 </th>
               ))}
-              <th style={{ ...th, textAlign: "left", cursor: "default" }} title={`Top failure codes on ${fmtDay(days.now)} (click a code to filter)`}>
-                Top decline codes
-              </th>
-              <th style={{ ...th, cursor: "default" }} />
+              {showCol("top") && (
+                <th style={{ ...th, textAlign: "left", cursor: "default" }} title={`Top failure codes on ${fmtDay(days.now)} (click a code to filter)`}>
+                  Top decline codes
+                </th>
+              )}
+              {showCol("alert") && <th style={{ ...th, cursor: "default" }} />}
             </tr>
           </thead>
           <tbody>

@@ -526,6 +526,7 @@ function UmnLookup() {
 
 const MERCHANT_COLUMNS = [
   { key: "mid", label: "MID", align: "left" },
+  { key: "merchant_name", label: "Display name", align: "left", render: (r) => dash(r.merchant_name) },
   { key: "mcc", label: "MCC", align: "left" },
   { key: "user_id", label: "User ID", align: "left" },
   { key: "merchant_type", label: "Type", align: "left" },

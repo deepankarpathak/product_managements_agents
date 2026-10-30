@@ -4,16 +4,20 @@
 //
 // runTrino: one Trino service account is shared by every dashboard, the Utilities tab and the
 // Analyst Agent, so all callers in this process go through one concurrency cap
-// (MDASH_TRINO_MAX_CONCURRENT, default 3) and resubmit on "Too many queued queries".
+// (MDASH_TRINO_MAX_CONCURRENT, default 3) and resubmit on "Too many queued queries". Each query
+// runs on the primary account (TRINO_SERVICE_*) and falls back once to TRINO_BACKUP_* if rejected.
 // runRedashOnce / runRedashWithEnv: one SQL on a Redash instance (env pair URL + key).
 
 // ─── Trino executor ──────────────────────────────────────────────────────────
 
-export function trinoEnv() {
+// TRINO_SERVICE_USER / _PASSWORD is the primary account; TRINO_BACKUP_USER / _PASSWORD (optional)
+// is tried when the primary is rejected (bad credentials, access denied, queue full).
+export function trinoEnv(account = "primary") {
+  const backup = account === "backup";
   return {
     url: (process.env.TRINO_API_URL || "").replace(/\/+$/, ""),
-    user: process.env.TRINO_SERVICE_USER || "",
-    password: process.env.TRINO_SERVICE_PASSWORD || "",
+    user: (backup ? process.env.TRINO_BACKUP_USER : process.env.TRINO_SERVICE_USER) || "",
+    password: (backup ? process.env.TRINO_BACKUP_PASSWORD : process.env.TRINO_SERVICE_PASSWORD) || "",
     source: process.env.TRINO_SOURCE || "morning-dashboard",
     catalog: process.env.TRINO_CATALOG || "",
     schema: process.env.TRINO_SCHEMA || "",
@@ -85,6 +89,22 @@ function releaseTrino() {
 }
 
 const isQueueFull = (err) => /too many queued queries/i.test(err?.message || "");
+// Errors the backup account may not hit: wrong/expired credentials, missing grants, a full queue.
+const isAccountError = (err) =>
+  isQueueFull(err) || /invalid credentials|access denied|unauthorized|HTTP 401|HTTP 403/i.test(err?.message || "");
+const hasBackup = () => Boolean(process.env.TRINO_BACKUP_USER && process.env.TRINO_BACKUP_PASSWORD);
+
+// Primary account first; on an account-level rejection, the same SQL once more on the backup.
+async function runTrinoWithBackup(sql, opts) {
+  try {
+    return await runTrinoOnce(sql, opts);
+  } catch (err) {
+    if (!hasBackup() || !isAccountError(err) || opts.signal?.aborted) throw err;
+    console.warn(`[trino] ${trinoEnv().user} rejected (${err.message.slice(0, 120)}) — retrying as backup ${trinoEnv("backup").user}`);
+    opts.onProgress?.({ state: "primary Trino account rejected — retrying on backup account" });
+    return await runTrinoOnce(sql, { ...opts, account: "backup" });
+  }
+}
 
 export async function runTrino(sql, opts = {}) {
   const { signal, onProgress, timeoutMs = 600000 } = opts;
@@ -94,7 +114,7 @@ export async function runTrino(sql, opts = {}) {
   try {
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await runTrinoOnce(sql, { ...opts, timeoutMs: Math.max(30000, deadline - Date.now()) });
+        return await runTrinoWithBackup(sql, { ...opts, timeoutMs: Math.max(30000, deadline - Date.now()) });
       } catch (err) {
         // Queue full is transient: keep resubmitting (15s, 30s, … capped at 60s) until the run's own timeout.
         const wait = Math.min(60000, attempt * 15000);
@@ -108,8 +128,8 @@ export async function runTrino(sql, opts = {}) {
   }
 }
 
-async function runTrinoOnce(sql, { signal, timeoutMs = 600000, onProgress }) {
-  const env = trinoEnv();
+async function runTrinoOnce(sql, { signal, timeoutMs = 600000, onProgress, account = "primary" }) {
+  const env = trinoEnv(account);
   const missing = ["url", "user", "password"].filter((k) => !env[k]);
   if (missing.length) throw new Error(`Trino not configured (TRINO_API_URL / TRINO_SERVICE_USER / TRINO_SERVICE_PASSWORD)`);
   const headers = trinoHeaders(env);

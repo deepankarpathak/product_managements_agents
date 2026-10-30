@@ -35,9 +35,11 @@ const resolveSql = (by, values) =>
     ? `SELECT mid AS input, user_id FROM merchant_details WHERE mid IN (${sqlList(values)})`
     : `SELECT vpa AS input, user_id FROM user_vpa WHERE vpa IN (${sqlList(values)})`;
 const MERCHANT_SQL = {
-  merchants: (by, values) => `SELECT x.input, m.*
+  // Display name lives on the PMS `user` row (user.id = merchant_details.user_id).
+  merchants: (by, values) => `SELECT x.input, usr.name AS merchant_name, m.*
 FROM (${resolveSql(by, values)}) x
-JOIN merchant_details m ON m.user_id = x.user_id`,
+JOIN merchant_details m ON m.user_id = x.user_id
+LEFT JOIN \`user\` usr ON usr.id = m.user_id`,
   vpas: (by, values) => `SELECT x.input, u.*
 FROM (${resolveSql(by, values)}) x
 JOIN user_vpa u ON u.user_id = x.user_id

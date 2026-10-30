@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { periods, periodLabels, aggregate, errorRows, errorCols, ScoreTable } from "./unified-scorecard.jsx";
+import { mccName } from "./mcc-names.js";
 
 // Product Wise dashboard — per-product health for Paytm TPAP handles
 // (PTYES, PTAXIS, PTSBI, PTHDFC). UPI International, UPI Plugin (@yesnext, see
@@ -478,7 +479,57 @@ function downloadCsv(name, cols, rows) {
  * tableToggle: show the chart by default with a Trend / Table switch (chartless panels show the
  *   table); downloads: [{ label, name, cols, rows }] CSV buttons (default: the table).
  */
-function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, onShowSql, onRefresh, onStop, tableMaxHeight, controls, tableToggle, downloads, emptyText, noTable }) {
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+// { level: "critical" | "warning", text } — shown as a count by a section title and a list under it.
+
+const ALERT_COLOR = { critical: "#f87171", warning: "#fbbf24" };
+const ALERT_SHOWN = 6;
+const byLevel = (a, b) => (a.level === "critical" ? 0 : 1) - (b.level === "critical" ? 0 : 1);
+
+function AlertCount({ alerts }) {
+  if (!alerts?.length) return null;
+  const crit = alerts.filter((a) => a.level === "critical").length;
+  const warn = alerts.length - crit;
+  const chip = (color, label) => (
+    <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color, border: `1px solid ${color}`, borderRadius: 999, padding: "1px 8px", verticalAlign: "middle" }}>{label}</span>
+  );
+  return (
+    <>
+      {crit > 0 && chip(ALERT_COLOR.critical, `● ${crit} critical`)}
+      {warn > 0 && chip(ALERT_COLOR.warning, `● ${warn} warning`)}
+    </>
+  );
+}
+
+function AlertList({ alerts }) {
+  const [all, setAll] = useState(false);
+  const sorted = [...alerts].sort(byLevel);
+  const shown = all ? sorted : sorted.slice(0, ALERT_SHOWN);
+  return (
+    <div style={{ padding: "8px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 4 }}>
+      {shown.map((a, i) => (
+        <div key={i} style={{ fontSize: 12, color: C.text, display: "flex", gap: 8, alignItems: "baseline" }}>
+          <span style={{ color: ALERT_COLOR[a.level], fontWeight: 700, minWidth: 64, textTransform: "uppercase", fontSize: 10 }}>{a.level}</span>
+          <span>
+            {a.text}
+            {a.detail?.map((d, j) => (
+              <div key={j} style={{ color: C.text2, fontSize: 11, marginTop: 2 }}>
+                {d}
+              </div>
+            ))}
+          </span>
+        </div>
+      ))}
+      {sorted.length > ALERT_SHOWN && (
+        <button type="button" onClick={() => setAll(!all)} style={{ ...btn(false), alignSelf: "flex-start", fontSize: 11, padding: "2px 8px" }}>
+          {all ? "Show fewer" : `+${sorted.length - ALERT_SHOWN} more`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, alerts, onShowSql, onRefresh, onStop, tableMaxHeight, controls, tableToggle, downloads, emptyText, noTable }) {
   const [view, setView] = useState("chart");
   const showChart = !tableToggle || view === "chart";
   const showTable = !tableToggle || view === "table" || !chart;
@@ -499,6 +550,7 @@ function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, o
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>
             {n} · {title}
+            <AlertCount alerts={alerts} />
           </div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>{desc}</div>
         </div>
@@ -534,6 +586,7 @@ function Section({ n, title, desc, job, cached, kpis, chart, cols, rows, note, o
         </button>
       </div>
       {controls && <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", padding: "8px 16px", borderBottom: `1px solid ${C.border}` }}>{controls}</div>}
+      {alerts?.length > 0 && <AlertList alerts={alerts} />}
       {job?.status === "error" && (
         <div style={{ padding: "8px 16px", color: C.bad, fontSize: 12, borderBottom: `1px solid ${C.border}` }}>Last run failed: {job.error}</div>
       )}
@@ -1987,7 +2040,9 @@ function PayoutsView({ cached, job, range, codeInfo, onShowSql, onRun, onStop })
 // status), other stages once per txn, payer handle 'paytm' excluded. SR = SUCCESS / all attempts.
 // Rows: dim ALL = every attempt (ts × purpose × stage × payer account × status × code);
 // dim BANK / HANDLE = failures by payer bank / payee handle (newest 7 days, codes with ≥ 50
-// failures that day, top 5 each + Other). The range picker (MONEY_RANGES) sets the current period.
+// failures that day, top 5 each + Other); dim MCC / PAYER_BANK / PAYEE = every attempt by payee
+// MCC / payer bank / payee handle (top 20 a day + Other, no code, no mode). Mode (initiationMode)
+// is on dim ALL only. The range picker (MONEY_RANGES) sets the current period.
 
 const MANDATE_STAGES = [
   { id: "CREATE", label: "Create" },
@@ -2001,7 +2056,25 @@ const MANDATE_ACCTS = ["CC", "CASA", "OTHER"];
 const ACCT_LABEL = { CC: "CC", CASA: "CASA", OTHER: "Other" };
 const ACCT_COLOR = { CC: "#f472b6", CASA: "#60a5fa", OTHER: "#a78bfa" };
 const PURPOSE_LABEL = { 14: "14 · AutoPay" };
-const MANDATE_TOP_CODES = 25;
+const MANDATE_MODES = [["04", "Intent · 04"], ["00", "Collect · 00"], ["13", "QR · 13"], ["11", "Mandate · 11"], ["NA", "Not set"]];
+const MODE_LABEL = Object.fromEntries(MANDATE_MODES);
+const MANDATE_SPLITS = [["MODE", "Mode"], ["MCC", "Payee MCC"], ["PAYER_BANK", "Payer bank"], ["PAYEE", "Payee handle"]];
+const MANDATE_CODE_TOPS = [25, 50];
+const MANDATE_SPLIT_TOPS = [15, 30];
+// Alert thresholds: SR down vs the previous period (or vs the 14-day average for D-1), in pp;
+// a failure code's share of attempts up, in pp; a split key's latest-day failures vs its average.
+// Slices with fewer than MANDATE_ALERT_MIN attempts (or failures) are not flagged.
+const MANDATE_ALERT_PP = { critical: 2, warning: 1 };
+const MANDATE_ALERT_SHARE_PP = { critical: 1, warning: 0.3 };
+const MANDATE_ALERT_SPIKE = { critical: 2, warning: 1.5 };
+const MANDATE_ALERT_MIN = 1000;
+const MANDATE_ALERT_MIN_FAIL = 100;
+// Top N banks per code (section 3), codes per payer bank (section 5) and drivers per SR alert.
+const MANDATE_TOP_DRIVERS = 3;
+const dropLevel = (dpp) => (dpp == null ? null : dpp <= -MANDATE_ALERT_PP.critical ? "critical" : dpp <= -MANDATE_ALERT_PP.warning ? "warning" : null);
+// Days before D-1 the takeaway line averages over.
+const MANDATE_TAKEAWAY_DAYS = 14;
+const splitKeyLabel = (dim, k) => (dim === "MODE" ? MODE_LABEL[k] || k : dim === "MCC" && mccName(k) ? `${k} · ${mccName(k)}` : k);
 const ZERO_ATT = { c: 0, s: 0, f: 0 };
 
 function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }) {
@@ -2011,6 +2084,11 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
   const [codePick, setCodePick] = useState(null);
   const [dim, setDim] = useState("BANK");
   const [q, setQ] = useState("");
+  const [mode, setMode] = useState("all");
+  const [splitDim, setSplitDim] = useState("MODE");
+  const [splitPick, setSplitPick] = useState(null);
+  const [codeTop, setCodeTop] = useState(MANDATE_CODE_TOPS[0]);
+  const [splitTop, setSplitTop] = useState(MANDATE_SPLIT_TOPS[0]);
   const P = useMemo(() => moneyPeriods(cached, range), [cached, range]);
   const curFrom = P ? P.prev.length : 0;
   const curLabel = spanLabel(P?.cur);
@@ -2019,13 +2097,14 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
   const accts = acct === "all" ? MANDATE_ACCTS : [acct];
   const stageLabel = MANDATE_STAGES.find((s) => s.id === stage)?.label || stage;
   const acctLabel = acct === "all" ? "all payer accounts" : ACCT_LABEL[acct];
+  const modeLabel = mode === "all" ? "all modes" : MODE_LABEL[mode] || mode;
 
   const purposes = useMemo(() => {
     const m = sumBy((cached?.rows || []).filter((r) => r.dim === "ALL"), (r) => r.purpose, ["c"]);
     return [...m.entries()].sort((a, b) => b[1].c - a[1].c).map(([p]) => p);
   }, [cached]);
   const inPurpose = (r) => purpose === "all" || r.purpose === purpose;
-  const base = useMemo(() => (cached?.rows || []).filter((r) => r.dim === "ALL" && inPurpose(r)), [cached, purpose]); // eslint-disable-line react-hooks/exhaustive-deps
+  const base = useMemo(() => (cached?.rows || []).filter((r) => r.dim === "ALL" && inPurpose(r) && (mode === "all" || (r.mode || "NA") === mode)), [cached, purpose, mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ts|stage|acct → { c, s, f }
   const att = useMemo(() => {
@@ -2146,7 +2225,7 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
     return i ? [i.npci, i.bank].filter(Boolean).join(" · ") : "";
   };
   const needle = q.trim().toLowerCase();
-  const codesShown = needle ? codes.filter((r) => r.code.toLowerCase().includes(needle) || descOf(r.code).toLowerCase().includes(needle)) : codes.slice(0, MANDATE_TOP_CODES);
+  const codesShown = needle ? codes.filter((r) => r.code.toLowerCase().includes(needle) || descOf(r.code).toLowerCase().includes(needle)) : codes.slice(0, codeTop);
 
   // Section 4: the selected code — daily share per payer account + payer bank / payee handle split.
   const focus = useMemo(() => {
@@ -2157,7 +2236,7 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
     const shown = MANDATE_ACCTS.filter((a) => accts.includes(a) && P.chart.some((d) => fails(d, [a])));
     const lines = shown.map((a) => ({ name: `${ACCT_LABEL[a]} share`, color: ACCT_COLOR[a], values: P.chart.map((d) => pct(fails(d, [a]), tot([d], stage, [a]).c)) }));
     const split = (cached?.rows || []).filter((r) => r.dim === dim && inPurpose(r) && r.stage === stage && r.code === code && accts.includes(r.acct));
-    const days = [...new Set((cached?.rows || []).filter((r) => r.dim !== "ALL").map((r) => r.ts))].sort().reverse();
+    const days = [...new Set((cached?.rows || []).filter((r) => r.dim === dim).map((r) => r.ts))].sort().reverse();
     const m = new Map();
     for (const r of split) {
       let o = m.get(r.k);
@@ -2169,6 +2248,208 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
     const rows = [...m.values()].map((o) => ({ ...o, share: pct(o.total, all) })).sort((a, b) => (a.k === "Other") - (b.k === "Other") || b.total - a.total);
     return { lines, bars: P.chart.map((d) => fails(d, accts)), days, rows };
   }, [P, code, base, cached, stage, dim, tot, acct, purpose]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Takeaway: D-1 (last day of the range) vs the average of the days before it.
+  const take = useMemo(() => {
+    if (!P) return null;
+    const d1 = P.cur[P.cur.length - 1];
+    const days = [...new Set(base.map((r) => r.ts))].sort().filter((d) => d < d1);
+    const prior = days.slice(-MANDATE_TAKEAWAY_DAYS);
+    const y = tot([d1], stage, accts);
+    if (!y.c) return null;
+    const fails = new Map();
+    for (const r of base) if (r.ts === d1 && r.stage === stage && r.status === "FAILURE" && accts.includes(r.acct)) fails.set(r.code, (fails.get(r.code) || 0) + r.c);
+    const [top, topN] = [...fails.entries()].sort((a, b) => b[1] - a[1])[0] || [null, 0];
+    const sr = srOf(y);
+    const avg = prior.length ? srOf(tot(prior, stage, accts)) : null;
+    return { d1, prior, n: prior.length, c: y.c, sr, avg, dpp: sr != null && avg != null ? sr - avg : null, top, topN, topShare: pct(topN, y.f) };
+  }, [P, base, tot, stage, acct]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Failures by payer bank × code (dim BANK: newest 14 days, codes with ≥ 50 failures a day, top 10
+  // banks each) and SR by payer bank (dim PAYER_BANK) for the selected stage — feeds the top banks
+  // per code (section 3), top codes per bank (section 5) and the "why" of SR alerts (section 2).
+  const drivers = useMemo(() => {
+    const fail = new Map(); // ts → code → bank → n
+    const bankSr = new Map(); // ts → bank → { c, s }
+    const bankDays = new Set();
+    for (const r of cached?.rows || []) {
+      if (r.stage !== stage || !inPurpose(r) || !accts.includes(r.acct)) continue;
+      if (r.dim === "BANK" && r.status === "FAILURE") {
+        bankDays.add(r.ts);
+        let byCode = fail.get(r.ts);
+        if (!byCode) fail.set(r.ts, (byCode = new Map()));
+        let byBank = byCode.get(r.code);
+        if (!byBank) byCode.set(r.code, (byBank = new Map()));
+        byBank.set(r.k, (byBank.get(r.k) || 0) + r.c);
+      } else if (r.dim === "PAYER_BANK") {
+        let byBank = bankSr.get(r.ts);
+        if (!byBank) bankSr.set(r.ts, (byBank = new Map()));
+        let o = byBank.get(r.k);
+        if (!o) byBank.set(r.k, (o = { c: 0, s: 0 }));
+        o.c += r.c;
+        if (r.status === "SUCCESS") o.s += r.c;
+      }
+    }
+    // code → bank → n, and bank → code → n, over days
+    const pairs = (days) => {
+      const byCode = new Map();
+      const byBank = new Map();
+      for (const d of days)
+        for (const [c, banks] of fail.get(d) || [])
+          for (const [b, n] of banks) {
+            if (b === "Other") continue;
+            if (!byCode.has(c)) byCode.set(c, new Map());
+            byCode.get(c).set(b, (byCode.get(c).get(b) || 0) + n);
+            if (!byBank.has(b)) byBank.set(b, new Map());
+            byBank.get(b).set(c, (byBank.get(b).get(c) || 0) + n);
+          }
+      return { byCode, byBank };
+    };
+    const top = (m) => [...(m || new Map()).entries()].sort((a, b) => b[1] - a[1]).slice(0, MANDATE_TOP_DRIVERS).map(([k, n]) => ({ k, n }));
+    const cur = pairs(P?.cur || []);
+    return {
+      covered: (P?.cur || []).filter((d) => bankDays.has(d)).length,
+      banksOf: (c) => top(cur.byCode.get(c)),
+      codesOf: (b) => top(cur.byBank.get(b)),
+      // Why day d is low vs base days: codes whose share of attempts rose most (excess failures)
+      // and payer banks whose SR fell most (excess failures = day attempts × SR drop).
+      why: (d, baseDays) => {
+        const att = (days) => tot(days, stage, accts).c;
+        const codeFails = (days) => {
+          const m = new Map();
+          for (const r of base) if (days.includes(r.ts) && r.stage === stage && r.status === "FAILURE" && accts.includes(r.acct)) m.set(r.code, (m.get(r.code) || 0) + r.c);
+          return m;
+        };
+        const dAtt = att([d]);
+        const bAtt = att(baseDays);
+        const dF = codeFails([d]);
+        const bF = codeFails(baseDays);
+        const codes = [...dF.entries()]
+          .map(([c, n]) => {
+            const rate = pct(n, dAtt);
+            const bRate = pct(bF.get(c) || 0, bAtt) || 0;
+            return { k: c, n, rate, dpp: rate - bRate, excess: n - (dAtt * bRate) / 100 };
+          })
+          .filter((o) => o.excess > 0)
+          .sort((a, b) => b.excess - a.excess)
+          .slice(0, MANDATE_TOP_DRIVERS);
+        const sumBank = (days) => {
+          const m = new Map();
+          for (const day of days)
+            for (const [b, o] of bankSr.get(day) || []) {
+              const x = m.get(b) || { c: 0, s: 0 };
+              m.set(b, { c: x.c + o.c, s: x.s + o.s });
+            }
+          return m;
+        };
+        const bB = sumBank(baseDays);
+        const banks = [...sumBank([d]).entries()]
+          .filter(([b]) => b !== "Other" && bB.get(b)?.c)
+          .map(([b, o]) => {
+            const sr = pct(o.s, o.c);
+            const bsr = pct(bB.get(b).s, bB.get(b).c);
+            return { k: b, c: o.c, sr, bsr, excess: (o.c * (bsr - sr)) / 100 };
+          })
+          .filter((o) => o.excess > 0)
+          .sort((a, b) => b.excess - a.excess)
+          .slice(0, MANDATE_TOP_DRIVERS);
+        return { codes, banks };
+      },
+    };
+  }, [cached, base, P, tot, stage, acct, purpose]); // eslint-disable-line react-hooks/exhaustive-deps
+  const priorDays = (d) => [...new Set(base.map((r) => r.ts))].sort().filter((x) => x < d).slice(-MANDATE_TAKEAWAY_DAYS);
+  const whyDetail = (d, baseDays) => {
+    const w = drivers.why(d, baseDays);
+    const pp = (v) => fmtSigned(v, " pp", 2);
+    const out = [];
+    if (w.codes.length) out.push(`Why · codes up: ${w.codes.map((o) => `${o.k}${descOf(o.k) ? ` (${descOf(o.k).split(" · ").pop()})` : ""} ${fmtNum(o.n)}, ${pp(o.dpp)} of attempts, ~${fmtNum(Math.round(o.excess))} extra`).join(" · ")}`);
+    if (w.banks.length) out.push(`Why · payer banks down: ${w.banks.map((o) => `${o.k} SR ${fmtPct(o.sr, 2)} vs ${fmtPct(o.bsr, 2)} (${pp(o.sr - o.bsr)}, ~${fmtNum(Math.round(o.excess))} extra failures)`).join(" · ")}`);
+    if (!out.length) out.push("Why · no single code or payer bank stands out vs the baseline.");
+    return out;
+  };
+
+  // Section 5: the selected stage split by mode / payee MCC / payer bank / payee handle.
+  const split = useMemo(() => {
+    if (!P) return [];
+    const byMode = splitDim === "MODE";
+    const m = new Map(); // k → ts → { c, s }
+    for (const r of cached?.rows || []) {
+      if (r.dim !== (byMode ? "ALL" : splitDim) || r.stage !== stage || !inPurpose(r) || !accts.includes(r.acct)) continue;
+      const k = byMode ? r.mode || "NA" : r.k;
+      let byDay = m.get(k);
+      if (!byDay) m.set(k, (byDay = new Map()));
+      let o = byDay.get(r.ts);
+      if (!o) byDay.set(r.ts, (o = { c: 0, s: 0, f: 0 }));
+      o.c += r.c;
+      if (r.status === "SUCCESS") o.s += r.c;
+      else if (r.status === "FAILURE") o.f += r.c;
+    }
+    const sum = (byDay, days) => days.reduce((a, d) => { const o = byDay.get(d); if (o) { a.c += o.c; a.s += o.s; a.f += o.f; } return a; }, { c: 0, s: 0, f: 0 });
+    const rows = [...m.entries()].map(([k, byDay]) => {
+      const cur = sum(byDay, P.cur);
+      const prev = sum(byDay, P.prev);
+      const sr = pct(cur.s, cur.c);
+      const psr = pct(prev.s, prev.c);
+      return { id: k, k, c: cur.c, f: cur.c - cur.s, ff: cur.f, pc: prev.c, sr, psr, dpp: sr != null && psr != null ? sr - psr : null, daily: P.chart.map((d) => { const o = byDay.get(d); return o ? pct(o.s, o.c) : null; }) };
+    }).filter((r) => r.c || r.pc);
+    const all = rows.reduce((a, r) => a + r.c, 0);
+    return rows.map((r) => ({ ...r, share: pct(r.c, all) })).sort((a, b) => (a.k === "Other") - (b.k === "Other") || b.c - a.c).slice(0, splitTop);
+  }, [P, cached, splitDim, splitTop, stage, acct, purpose]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pickRow = splitPick && splitPick.dim === splitDim ? split.find((r) => r.k === splitPick.k) : null;
+  const dayLines = day && pickRow ? [...day.lines, { name: splitKeyLabel(splitDim, pickRow.k), color: "#fbbf24", values: pickRow.daily }] : day?.lines;
+
+  // Alerts per section (thresholds: MANDATE_ALERT_*).
+  const alerts = useMemo(() => {
+    const out = { 1: [], 2: [], 3: [], 4: [], 5: [] };
+    const pp = (v) => fmtSigned(v, " pp", 2);
+    for (const r of stages) {
+      const level = r.c >= MANDATE_ALERT_MIN && dropLevel(r.dpp);
+      if (level) out[1].push({ level, text: `${r.label} SR ${fmtPct(r.sr, 2)} vs ${fmtPct(r.psr, 2)} previous (${pp(r.dpp)}) on ${fmtNum(r.c)} attempts.` });
+      for (const [a, v, n] of [["CC", r.cc, tot(P?.cur || [], r.id, ["CC"])], ["CASA", r.casa, tot(P?.cur || [], r.id, ["CASA"])]]) {
+        if (!accts.includes(a) || n.c < MANDATE_ALERT_MIN) continue;
+        const pv = srOf(tot(P?.prev || [], r.id, [a]));
+        const l = dropLevel(v != null && pv != null ? v - pv : null);
+        if (l) out[1].push({ level: l, text: `${r.label} ${a} SR ${fmtPct(v, 2)} vs ${fmtPct(pv, 2)} previous (${pp(v - pv)}).` });
+      }
+    }
+    if (take && take.c >= MANDATE_ALERT_MIN) {
+      const level = dropLevel(take.dpp);
+      if (level) out[2].push({ level, text: `${stageLabel} SR on ${fmtDay(take.d1)} was ${fmtPct(take.sr, 2)}, ${pp(take.dpp)} vs the ${take.n}-day average ${fmtPct(take.avg, 2)}.`, detail: whyDetail(take.d1, take.prior) });
+    }
+    if (day) {
+      for (const r of day.rows) {
+        if (r._total || r.c < MANDATE_ALERT_MIN || r.sr == null || day.sr == null) continue;
+        const level = dropLevel(r.sr - day.sr);
+        if (level) out[2].push({ level, text: `${fmtDay(r.d)}: SR ${fmtPct(r.sr, 2)}, ${pp(r.sr - day.sr)} vs the period's ${fmtPct(day.sr, 2)}.`, detail: whyDetail(r.d, priorDays(r.d)) });
+      }
+    }
+    for (const r of codes) {
+      if (r.cur < MANDATE_ALERT_MIN_FAIL) continue;
+      const rise = r.share != null ? r.share - (r.pshare || 0) : null;
+      const level = rise == null ? null : rise >= MANDATE_ALERT_SHARE_PP.critical ? "critical" : rise >= MANDATE_ALERT_SHARE_PP.warning ? "warning" : r.trend.kind === "new" ? "warning" : null;
+      if (level) out[3].push({ level, text: `${r.code}${descOf(r.code) ? ` (${descOf(r.code)})` : ""}: ${fmtNum(r.cur)} failures, ${fmtPct(r.share, 2)} of attempts vs ${fmtPct(r.pshare, 2)} previous${r.trend.kind === "new" ? " — new code" : ` (${pp(rise)})`}.` });
+    }
+    if (focus?.days.length > 1) {
+      const [latest, ...older] = focus.days;
+      for (const r of focus.rows) {
+        if (r.k === "Other") continue;
+        const now = r[latest] || 0;
+        const avg = older.reduce((a, d) => a + (r[d] || 0), 0) / older.length;
+        // Keys near the top-10 cut-off drop into Other on some days; their zeros are not a baseline.
+        if (now < MANDATE_ALERT_MIN_FAIL / 2 || older.filter((d) => r[d]).length < older.length * 0.75) continue;
+        const x = avg ? now / avg : Infinity;
+        const level = x >= MANDATE_ALERT_SPIKE.critical ? "critical" : x >= MANDATE_ALERT_SPIKE.warning ? "warning" : null;
+        if (level) out[4].push({ level, text: `${code} at ${r.k}: ${fmtNum(now)} failures on ${fmtDay(latest)} vs ${fmtNum(Math.round(avg))} a day before (${avg ? `${x.toFixed(1)}×` : "new"}).` });
+      }
+    }
+    for (const r of split) {
+      if (r.k === "Other" || r.c < MANDATE_ALERT_MIN) continue;
+      const level = dropLevel(r.dpp);
+      if (level) out[5].push({ level, text: `${splitKeyLabel(splitDim, r.k)}: SR ${fmtPct(r.sr, 2)} vs ${fmtPct(r.psr, 2)} previous (${pp(r.dpp)}) on ${fmtNum(r.c)} attempts.` });
+    }
+    return out;
+  }, [stages, take, day, codes, focus, split, code, splitDim, stageLabel, P, tot, acct, drivers]); // eslint-disable-line react-hooks/exhaustive-deps
+  const alertTotal = Object.values(alerts).flat();
 
   const srTd = (v, ref) => <b style={{ color: srTone(v, ref) }}>{fmtPct(v, 2)}</b>;
   const stageCols = [
@@ -2215,12 +2496,71 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
     { key: "share", label: "% of attempts", title: `Failures ÷ ${stageLabel} attempts, ${curLabel}`, render: (r) => fmtPct(r.share, 2) },
     { key: "pshare", label: "Prev %", title: prevLabel, render: (r) => fmtPct(r.pshare, 2) },
     { key: "ofFail", label: "% of failures", render: (r) => fmtPct(r.ofFail) },
+    {
+      key: "banks",
+      label: `Top ${MANDATE_TOP_DRIVERS} payer banks`,
+      align: "left",
+      wrap: true,
+      title: `Payer banks with the most failures of this code, ${curLabel} (from the per-code bank split: newest 14 days, days with ≥ 50 failures of the code)`,
+      render: (r) => {
+        const b = drivers.banksOf(r.code);
+        return b.length ? (
+          <div style={{ minWidth: 170, fontSize: 11, lineHeight: 1.4 }}>
+            {b.map((o) => (
+              <div key={o.k}>
+                <code>{o.k}</code> {fmtNum(o.n)} <span style={{ color: C.muted }}>({fmtPct(pct(o.n, r.cur))})</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <span style={{ color: C.muted, fontSize: 11 }}>—</span>
+        );
+      },
+      text: (r) => drivers.banksOf(r.code).map((o) => `${o.k} ${o.n}`).join("; "),
+    },
     { key: "trend", label: "vs Prev", title: `Failed count vs ${prevLabel}; ±${TREND_PCT}% flagged`, render: (r) => <TrendBadge t={r.trend} />, text: (r) => (r.trend.kind === "new" ? "NEW" : fmtSigned(r.trend.pct, "%", 0)) },
     { key: "daily", label: "Daily % of attempts", title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={r.trend.kind === "up" || r.trend.kind === "new" ? C.bad : r.trend.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
     ...(acct === "all"
       ? [
           { key: "cc", label: "CC", title: `CC failures, ${curLabel}`, render: (r) => fmtNum(r.cc) },
           { key: "casa", label: "CASA", title: `CASA failures, ${curLabel}`, render: (r) => fmtNum(r.casa) },
+        ]
+      : []),
+  ];
+  const splitDimLabel = MANDATE_SPLITS.find(([k]) => k === splitDim)?.[1] || splitDim;
+  const srSplitCols = [
+    { key: "k", label: splitDimLabel, align: "left", render: (r) => <span>{pickRow?.k === r.k && <span style={{ color: "#fbbf24" }}>● </span>}<code style={{ fontSize: 12 }}>{splitKeyLabel(splitDim, r.k)}</code></span>, text: (r) => splitKeyLabel(splitDim, r.k) },
+    { key: "c", label: "Attempts", title: curLabel, render: (r) => fmtNum(r.c) },
+    { key: "share", label: "Share", title: `Share of ${stageLabel} attempts, ${curLabel}`, render: (r) => fmtPct(r.share) },
+    { key: "f", label: "Not success", render: (r) => fmtNum(r.f) },
+    { key: "sr", label: "SR", title: curLabel, render: (r) => srTd(r.sr, day?.sr), text: (r) => fmtPct(r.sr, 2) },
+    { key: "psr", label: "Prev SR", title: prevLabel, render: (r) => fmtPct(r.psr, 2) },
+    { key: "dpp", label: "Δ pp", render: (r) => <span style={{ color: ppToneOf(r.dpp), fontWeight: Math.abs(r.dpp || 0) >= 1 ? 700 : 400 }}>{fmtSigned(r.dpp, " pp", 2)}</span>, text: (r) => fmtSigned(r.dpp, " pp", 2) },
+    { key: "daily", label: "Daily SR", title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={ppToneOf(r.dpp) === C.text2 ? "#94a3b8" : ppToneOf(r.dpp)} curFrom={curFrom} />, text: () => "" },
+    ...(splitDim === "PAYER_BANK"
+      ? [
+          {
+            key: "codes",
+            label: `Top ${MANDATE_TOP_DRIVERS} failure codes`,
+            align: "left",
+            wrap: true,
+            title: `This bank's most frequent failure codes, ${curLabel}; % = share of the bank's failed attempts (from the per-code bank split: newest 14 days, codes with ≥ 50 failures a day where the bank is in that code's top 10)`,
+            render: (r) => {
+              const c = r.k === "Other" ? [] : drivers.codesOf(r.k);
+              return c.length ? (
+                <div style={{ minWidth: 200, fontSize: 11, lineHeight: 1.4 }}>
+                  {c.map((o) => (
+                    <div key={o.k} title={descOf(o.k)}>
+                      <code style={{ fontWeight: 700 }}>{o.k}</code> {fmtNum(o.n)} <span style={{ color: C.muted }}>({fmtPct(pct(o.n, r.ff))})</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <span style={{ color: C.muted, fontSize: 11 }}>—</span>
+              );
+            },
+            text: (r) => (r.k === "Other" ? "" : drivers.codesOf(r.k).map((o) => `${o.k} ${o.n}`).join("; ")),
+          },
         ]
       : []),
   ];
@@ -2239,6 +2579,7 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, marginBottom: 16, padding: "10px 16px", display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center" }}>
       <Pills label="Purpose" value={purpose} options={purposeOpts.length > 1 ? purposeOpts : [["14", PURPOSE_LABEL[14]], ["all", "All"]]} onChange={setPurpose} />
       <Pills label="Payer account" value={acct} options={[["all", "All"], ...MANDATE_ACCTS.map((a) => [a, ACCT_LABEL[a]])]} onChange={setAcct} />
+      <Pills label="Mode" value={mode} options={[["all", "All"], ...MANDATE_MODES]} onChange={setMode} />
       <Pills
         label="Stage"
         value={stage}
@@ -2246,18 +2587,45 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
         onChange={(s) => {
           setStage(s);
           setCodePick(null);
+          setSplitPick(null);
         }}
       />
+    </div>
+  );
+  const takeaway = take && (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, marginBottom: 16, padding: "12px 16px", fontSize: 14, lineHeight: 1.5, color: C.text }}>
+      <b>{stageLabel}</b> SR (purpose {purpose === "all" ? "all" : PURPOSE_LABEL[purpose] || purpose}, {acctLabel}, {modeLabel}) on <b>{fmtDay(take.d1)}</b> was <b>{fmtPct(take.sr, 2)}</b> on {fmtNum(take.c)} attempts
+      {take.avg != null ? (
+        <>
+          , against the {take.n}-day average of <b>{fmtPct(take.avg, 2)}</b> (<span style={{ color: ppToneOf(take.dpp), fontWeight: 700 }}>{fmtSigned(take.dpp, " pp", 2)}</span>)
+        </>
+      ) : null}
+      .{take.top && (
+        <>
+          {" "}Biggest failure code: <code style={{ fontWeight: 700 }}>{take.top}</code> ({fmtNum(take.topN)}, {fmtPct(take.topShare)} of failures){descOf(take.top) ? ` · ${descOf(take.top)}` : ""}.
+        </>
+      )}
     </div>
   );
 
   return (
     <>
       {filters}
+      {takeaway}
+      {alertTotal.length > 0 && (
+        <div style={{ background: C.card, border: `1px solid ${alertTotal.some((a) => a.level === "critical") ? ALERT_COLOR.critical : ALERT_COLOR.warning}`, borderRadius: 10, marginBottom: 16, padding: "10px 16px", fontSize: 13, color: C.text, display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center" }}>
+          <b>Alerts</b>
+          <AlertCount alerts={alertTotal} />
+          <span style={{ color: C.muted, fontSize: 12 }}>
+            {Object.entries(alerts).filter(([, a]) => a.length).map(([n, a]) => `§${n}: ${a.length}`).join(" · ")} — SR down ≥ {MANDATE_ALERT_PP.warning} pp warning / ≥ {MANDATE_ALERT_PP.critical} pp critical; code share up ≥ {MANDATE_ALERT_SHARE_PP.warning} / {MANDATE_ALERT_SHARE_PP.critical} pp; split failures ≥ {MANDATE_ALERT_SPIKE.warning}× / {MANDATE_ALERT_SPIKE.critical}× their average.
+          </span>
+        </div>
+      )}
       <Section
         n={1}
+        alerts={alerts[1]}
         title="Success rate by mandate stage"
-        desc={`Purpose ${purpose === "all" ? "all" : purpose} · ${acctLabel} · current ${curLabel} vs previous ${prevLabel}. SR = successful ÷ all attempts. Executions count once per UMN + payer + execution number per day (latest status); Create / Revoke / Pause / Unpause once per txn; payer handle @paytm left out. CC = payer account on a credit card, CASA = savings / current. Click a stage to drill in.`}
+        desc={`Purpose ${purpose === "all" ? "all" : purpose} · ${acctLabel} · current ${curLabel} vs previous ${prevLabel}. SR = successful ÷ all attempts. Mode: ${modeLabel}. Executions count once per UMN + payer + execution number per day (latest status); Create / Revoke / Pause / Unpause once per txn; payer handle @paytm left out. CC = payer account on a credit card, CASA = savings / current. Click a stage to drill in.`}
         {...panel}
         cols={stageCols}
         rows={stages.map((r) => ({ ...r, _active: r.id === stage, _onClick: () => {
@@ -2267,8 +2635,9 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
       />
       <Section
         n={2}
+        alerts={alerts[2]}
         title={`${stageLabel} success rate, day on day`}
-        desc={`Daily SR by payer account (${acctLabel}); bars = attempts. Red = day SR more than ${LOW_SR_PP} pp below the period SR.`}
+        desc={`Daily SR by payer account (${acctLabel}, ${modeLabel}); bars = attempts. Red = day SR more than ${LOW_SR_PP} pp below the period SR. Click a row in section 5 to add it here as a yellow line.`}
         {...panel}
         tableToggle
         kpis={
@@ -2282,17 +2651,21 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
             </>
           )
         }
-        chart={day && P && <TrendChart days={P.chart} lines={day.lines} bars={{ name: "Attempts", values: day.bars }} curFrom={curFrom} yFmt={(v) => fmtPct(v, 2)} />}
+        chart={day && P && <TrendChart days={P.chart} lines={dayLines} bars={{ name: "Attempts", values: day.bars }} curFrom={curFrom} yFmt={(v) => fmtPct(v, 2)} />}
         cols={dayCols}
         rows={day && day.cur.c + day.prev.c ? day.rows : []}
       />
       <Section
         n={3}
+        alerts={alerts[3]}
         title={`${stageLabel} failure codes`}
-        desc={`Code = NPCI response code, else the app code; description from docs/UPI_Error_Response_Code_Reference.md. % of attempts = failures ÷ ${stageLabel} attempts (${acctLabel}). ${needle ? "" : `Top ${MANDATE_TOP_CODES} by failures; search to see the rest.`} Click a code for its trend and where it fails.`}
+        desc={`Code = NPCI response code, else the app code; description from docs/UPI_Error_Response_Code_Reference.md. % of attempts = failures ÷ ${stageLabel} attempts (${acctLabel}). ${needle ? "" : `Top ${codeTop} by failures; search to see the rest.`} Top payer banks come from the per-code bank split (newest 14 days, codes with ≥ 50 failures a day)${drivers.covered < (P?.cur.length || 0) ? ` — it covers ${drivers.covered} of the ${P.cur.length} days in range` : ""}. Click a code for its trend and where it fails.`}
         {...panel}
         controls={
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a code or its description…" style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, fontSize: 12, padding: "5px 9px", width: 260 }} />
+          <>
+            <Pills label="Show" value={codeTop} options={MANDATE_CODE_TOPS.map((t) => [t, `Top ${t}`])} onChange={setCodeTop} />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a code or its description…" style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, fontSize: 12, padding: "5px 9px", width: 260 }} />
+          </>
         }
         cols={codeCols}
         rows={codesShown.map((r) => ({ ...r, _active: r.code === code, _onClick: () => setCodePick(r.code) }))}
@@ -2301,14 +2674,32 @@ function MandatesView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }
       />
       <Section
         n={4}
+        alerts={alerts[4]}
         title={code ? `${code} · ${stageLabel} — trend and where it fails` : "Where the code fails"}
-        desc={`Lines = the code's failures ÷ ${stageLabel} attempts per day, per payer account; bars = failures. Table = failures by ${dim === "BANK" ? "payer bank (bank_code)" : "payee handle"} for the newest ${focus?.days.length || 7} days — kept only for codes with at least 50 failures that day, top 5 each, the rest as Other.`}
+        desc={`Lines = the code's failures ÷ ${stageLabel} attempts per day, per payer account; bars = failures. Table = failures by ${dim === "BANK" ? "payer bank (bank_code)" : "payee handle"} for the newest ${focus?.days.length || 14} days — kept only for codes with at least 50 failures that day; top 10 ${dim === "BANK" ? "banks" : "handles"} a day ranked across all payer accounts, the rest as Other.`}
         {...panel}
         controls={<Pills label="Split by" value={dim} options={[["BANK", "Payer bank"], ["HANDLE", "Payee handle"]]} onChange={setDim} />}
         chart={focus && P && <TrendChart days={P.chart} lines={focus.lines} bars={{ name: "Failures", values: focus.bars }} curFrom={curFrom} yFmt={(v) => fmtPct(v, 2)} />}
         cols={splitCols}
-        rows={focus?.rows.length ? focus.rows : focus ? [{ id: "__none", k: "no split kept for this code (under 50 failures a day, or older than 7 days)", total: 0, share: null }] : []}
+        rows={focus?.rows.length ? focus.rows : focus ? [{ id: "__none", k: "no split kept for this code (under 50 failures a day, or older than 14 days)", total: 0, share: null }] : []}
         emptyText={cached ? "Pick a failure code in section 3." : undefined}
+      />
+      <Section
+        n={5}
+        alerts={alerts[5]}
+        title={`${stageLabel} success rate by ${splitDim === "MODE" ? "mode" : splitDimLabel}`}
+        desc={`Purpose ${purpose === "all" ? "all" : purpose} · ${acctLabel} · current ${curLabel} vs previous ${prevLabel}. ${splitDim === "MODE" ? "Mode = extended_info initiationMode; the Mode filter above is not applied here." : `Top 30 by attempts each day, the rest as Other; mode is not split for these, so the Mode filter does not apply.${splitDim === "PAYEE" ? " Mandate payee legs carry no bank code, so the payee side is split by handle (acquirer PSP)." : ""}`} Top ${splitTop} rows.${splitDim === "PAYER_BANK" ? ` Top failure codes per bank come from the per-code bank split (newest 14 days; a bank shows a code where it is in that code's top 10 banks)${drivers.covered < (P?.cur.length || 0) ? `, covering ${drivers.covered} of the ${P.cur.length} days in range` : ""}.` : ""} Click a row to add it as a line in section 2.`}
+        {...panel}
+        controls={
+          <>
+            <Pills label="Split by" value={splitDim} options={MANDATE_SPLITS} onChange={(d) => { setSplitDim(d); setSplitPick(null); }} />
+            <Pills label="Show" value={splitTop} options={MANDATE_SPLIT_TOPS.map((t) => [t, `Top ${t}`])} onChange={setSplitTop} />
+          </>
+        }
+        cols={srSplitCols}
+        rows={split.map((r) => ({ ...r, _active: pickRow?.k === r.k, _onClick: () => setSplitPick(pickRow?.k === r.k ? null : { dim: splitDim, k: r.k }) }))}
+        tableMaxHeight={560}
+        emptyText={cached ? (splitDim === "MODE" ? "No attempts for this stage in the selected period." : "No split rows yet — refresh to fetch MCC / bank / handle data.") : undefined}
       />
     </>
   );
@@ -2769,7 +3160,7 @@ export default function ProductDashboard() {
               : product === "payouts"
               ? "Payouts · external_txn_info · every day since the 1st of last month (for MTD / LMTD), sliced by the range picker · source PTYBL Redash (Refund MySQL, live)"
               : product === "mandates"
-              ? "Mandates · all PSPs · last 30 complete days, sliced by the range picker · SR by stage (Create, 1st / recurring execution, Revoke, Pause, Unpause) and payer account (CC / CASA) · source Trino (switch txn_info + txn_participants)"
+              ? "Mandates · all PSPs · last 30 complete days, sliced by the range picker · SR by stage (Create, 1st / recurring execution, Revoke, Pause, Unpause), payer account (CC / CASA), mode, payee MCC, payer bank and payee handle · source Trino (switch txn_info + txn_participants)"
               : product === "lite"
               ? "UPI Lite · all PSPs · last 30 complete days by default (each section's Trend filter fetches up to 120) + daily snapshots · source Trino (team_product summaries, switch txn_info, tpap_pms / switch / ups snapshots)"
               : `${PRODUCTS.find((p) => p.id === product)?.label.replace(/^\S+\s/, "")} · ${handleLabel} · current ${periodLabel} vs previous ${prevLabel} · source Trino (tpap_pms / switch snapshots)`}

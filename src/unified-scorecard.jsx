@@ -145,33 +145,37 @@ export function scoreCols(metric, per) {
  * Top-N failure codes: Y / MTD / LMTD failures, contribution %, MTD and Yday Δ.
  * pinned: a code kept out of the ranking and listed last (the backend's long-tail bucket).
  */
-export function errorRows(agg, topN, descr = {}, pinned = null) {
+export function errorRows(agg, topN, descr = {}, pinned = null, { lmtdDays = 0, pick = null } = {}) {
   const fails = (x) => x.total - x.success;
   const codes = Object.keys(agg).filter((k) => k !== "__ALL__");
   const tot = { y: 0, db: 0, mtd: 0, lmtd: 0 };
   for (const c of codes) for (const k of Object.keys(tot)) tot[k] += fails(agg[c][k]);
+  // D vs LMTD (opt-in): LMTD failures per day, D vs that daily average (%), contribution D − LMTD (pp).
+  const dVsLmtd = (f) => (lmtdDays > 0 ? [f.lmtd / lmtdDays, chg(f.y, f.lmtd / lmtdDays), diff(pct(f.y, tot.y), pct(f.lmtd, tot.lmtd))] : []);
   const all = codes
     .map((code) => {
       const a = agg[code];
       return { code, f: { y: fails(a.y), db: fails(a.db), mtd: fails(a.mtd), lmtd: fails(a.lmtd) } };
     })
     .filter((r) => r.f.y > 0 || r.f.mtd > 0);
-  const rows = [
-    ...all
-      .filter((r) => r.code !== pinned)
-      .sort((a, b) => b.f.y - a.f.y || b.f.mtd - a.f.mtd)
-      .slice(0, topN),
-    ...all.filter((r) => r.code === pinned),
-  ].map(({ code, f }) => ({
+  const ranked = all.filter((r) => r.code !== pinned).sort((a, b) => b.f.y - a.f.y || b.f.mtd - a.f.mtd);
+  const top = ranked.slice(0, topN);
+  // pick (optional): { hidden, added } — codes removed from / added beyond the top N.
+  const hidden = new Set(pick?.hidden || []);
+  const added = (pick?.added || []).map((c) => ranked.find((r) => r.code === c)).filter((r) => r && !top.includes(r));
+  const rows = [...top.filter((r) => !hidden.has(r.code)), ...added, ...all.filter((r) => r.code === pinned && !hidden.has(r.code))].map(({ code, f }) => ({
     dim: code,
     title: descr[code] || "",
-    cells: [f.y, pct(f.y, tot.y), f.mtd, f.lmtd, pct(f.mtd, tot.mtd), pct(f.lmtd, tot.lmtd), chg(f.mtd, f.lmtd), chg(f.y, f.db)],
+    cells: [f.y, pct(f.y, tot.y), f.mtd, f.lmtd, pct(f.mtd, tot.mtd), pct(f.lmtd, tot.lmtd), chg(f.mtd, f.lmtd), chg(f.y, f.db), ...dVsLmtd(f)],
   }));
-  const total = { dim: "All failures", cells: [tot.y, 100, tot.mtd, tot.lmtd, 100, 100, chg(tot.mtd, tot.lmtd), chg(tot.y, tot.db)] };
-  return { rows, total };
+  const total = { dim: "All failures", cells: [tot.y, 100, tot.mtd, tot.lmtd, 100, 100, chg(tot.mtd, tot.lmtd), chg(tot.y, tot.db), ...dVsLmtd(tot)] };
+  // defaults / options feed a row picker: the top N, and every code with its yesterday failures.
+  const defaults = [...top, ...all.filter((r) => r.code === pinned)].map((r) => r.code);
+  const options = [...ranked, ...all.filter((r) => r.code === pinned)].map((r) => ({ id: r.code, label: r.code, sub: `${Math.round(r.f.y).toLocaleString("en-IN")} fails · ${descr[r.code] || ""}` }));
+  return { rows, total, defaults, options };
 }
 
-export function errorCols(per) {
+export function errorCols(per, { dVsLmtd = false } = {}) {
   return [
     { label: "Yesterday Failures", title: per.y, fmt: fmtNum },
     { label: "Yesterday Contrib%", title: "Share of all failures yesterday", fmt: (v) => fmtPct(v) },
@@ -181,8 +185,18 @@ export function errorCols(per) {
     { label: "LMTD Contrib%", title: "Share of all LMTD failures", fmt: (v) => fmtPct(v) },
     { label: "MTD Δ%", title: "MTD failures vs LMTD failures, % change", fmt: (v) => fmtSigned(v, "%", 1), tone: false },
     { label: "Yday Δ%", title: "Yesterday failures vs Day Before failures, % change", fmt: (v) => fmtSigned(v, "%", 1), tone: false },
+    ...(dVsLmtd
+      ? [
+          { label: "LMTD Fails/day", title: `LMTD failures ÷ days in LMTD (${per.lmtd})`, fmt: fmtNum },
+          { label: "D vs LMTD Δ%", title: `Yesterday (${per.y}) failures vs LMTD daily average, % change`, fmt: (v) => fmtSigned(v, "%", 1), tone: false },
+          { label: "Contrib D vs LMTD", title: "Yesterday contribution % − LMTD contribution %, percentage points", fmt: (v) => fmtSigned(v, " pp"), tone: false },
+        ]
+      : []),
   ];
 }
+
+/** Calendar days in the LMTD window (1st of last month → same day-of-month). */
+export const lmtdDays = (P) => (P ? Math.round((Date.parse(`${P.lmtdTo}T00:00:00Z`) - Date.parse(`${P.lmtdFrom}T00:00:00Z`)) / 86400000) + 1 : 0);
 
 // ─── table ───────────────────────────────────────────────────────────────────
 
@@ -230,7 +244,13 @@ function toTsv(firstCol, cols, rows, total) {
 }
 
 /** cols: [{ label, title, fmt, tone?: boolean (goodWhenUp) }]; rows: [{ dim, title?, cells }]. */
-export function ScoreTable({ firstCol, cols, rows, total, caption }) {
+/** hide: column labels to leave out; tools: nodes (e.g. pickers) in the caption bar. */
+export function ScoreTable({ firstCol, cols: allCols, rows: allRows, total: allTotal, caption, hide = null, tools = null }) {
+  const keep = allCols.map((c) => !hide || !hide.includes(c.label));
+  const cols = allCols.filter((_, i) => keep[i]);
+  const trim = (r) => r && { ...r, cells: r.cells.filter((_, i) => keep[i]) };
+  const rows = hide ? allRows.map(trim) : allRows;
+  const total = hide ? trim(allTotal) : allTotal;
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -259,9 +279,10 @@ export function ScoreTable({ firstCol, cols, rows, total, caption }) {
   );
   if (!rows.length && !total) return <div style={{ padding: 20, color: C.muted, fontSize: 13 }}>No data in the cached result.</div>;
   return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.muted }}>
         <span style={{ flex: 1 }}>{caption}</span>
+        {tools}
         <button type="button" style={btn} onClick={copy} disabled={!rows.length}>
           {copied ? "Copied" : "Copy (TSV)"}
         </button>

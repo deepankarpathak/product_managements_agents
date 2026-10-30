@@ -163,12 +163,18 @@ GROUP BY 1, 2, 3, 4`;
 // latest status; CREATE / REVOKE / PAUSE / UNPAUSE once per txn; payer handle 'paytm' excluded;
 // COLLECT without an execution number dropped. Payer account: CC = CREDIT, CASA = SAVINGS /
 // CURRENT, else OTHER. Failure code = NPCI code, else app code.
-// dim ALL = every attempt; dim BANK / HANDLE = failures by payer bank / payee handle, only for
-// codes with at least MANDATE_SPLIT_MIN failures that day, top MANDATE_SPLIT_TOP each (rest Other).
+// Initiation mode = extended_info initiationMode (00 collect / 04 intent / 13 QR / 11 mandate).
+// dim ALL = every attempt (with mode); dim BANK / HANDLE = failures by payer bank / payee handle,
+// only for codes with at least MANDATE_SPLIT_MIN failures that day (all payer accounts), top
+// MANDATE_SPLIT_TOP keys per day × purpose × stage × code ranked across payer accounts, so a bank
+// is kept (or pooled into Other) for every account alike. dim MCC / PAYER_BANK / PAYEE = every attempt by payee MCC / payer bank / payee
+// handle (no code, no mode), top MANDATE_SR_TOP keys by attempts per day × purpose × stage. The
+// payee leg carries no bank code for mandates, so the payee side is split by handle (acquirer PSP).
 const MANDATE_SPLIT_MIN = 50;
-const MANDATE_SPLIT_TOP = 5;
+const MANDATE_SPLIT_TOP = 10;
+const MANDATE_SR_TOP = 30;
 // Bank / handle split rows are kept for the newest days only (keeps the cache small).
-const MANDATE_SPLIT_DAYS = 7;
+const MANDATE_SPLIT_DAYS = 14;
 // Snapshot partitions read per day: the day itself + this many after it (a txn lives in the
 // partition of its last update; mandate txns settle within a day or two). Unbounded, an old
 // day would scan every partition up to today.
@@ -182,7 +188,8 @@ const MANDATE_DAY_SQL = `WITH tp AS (
          MAX(CASE WHEN participant_type = 'PAYER' THEN scope_cust_id END)    AS cust,
          MAX(CASE WHEN participant_type = 'PAYER' THEN handle END)           AS payer_handle,
          MAX(CASE WHEN participant_type = 'PAYER' THEN bank_code END)        AS payer_bank,
-         MAX(CASE WHEN participant_type = 'PAYEE' THEN lower(handle) END)    AS payee_handle
+         MAX(CASE WHEN participant_type = 'PAYEE' THEN lower(handle) END)    AS payee_handle,
+         MAX(CASE WHEN participant_type = 'PAYEE' THEN mcc END)              AS mcc
   FROM hive.switch.txn_participants_snapshot_v3
   WHERE dl_last_updated BETWEEN DATE '{{DAY}}' AND DATE '{{NEXT_DAY}}' + INTERVAL '${MANDATE_LATE_DAYS}' DAY
     AND created_on >= TIMESTAMP '{{DAY}} 00:00:00' AND created_on < TIMESTAMP '{{NEXT_DAY}} 00:00:00'
@@ -192,6 +199,7 @@ const MANDATE_DAY_SQL = `WITH tp AS (
 ti AS (
   SELECT txn_id, created_on, CAST(date(created_on) AS varchar) AS ts, status, type, umn,
          COALESCE(NULLIF(trim(json_extract_scalar(extended_info, '$.purpose')), ''), '(none)')     AS purpose,
+         COALESCE(NULLIF(trim(json_extract_scalar(extended_info, '$.initiationMode')), ''), 'NA')  AS mode,
          COALESCE(NULLIF(trim(npci_resp_code), ''), NULLIF(trim(app_resp_code), ''), 'UNKNOWN')    AS code,
          TRY_CAST(json_extract_scalar(extended_info, '$.MANDATE_EXECUTION_NUMBER') AS INTEGER)    AS ex
   FROM hive.switch.txn_info_snapshot_v3
@@ -201,7 +209,7 @@ ti AS (
     AND type IN ('CREATE', 'COLLECT', 'REVOKE', 'PAUSE', 'UNPAUSE')
 ),
 j AS (
-  SELECT ti.*, COALESCE(tp.acct, 'OTHER') AS acct, tp.payer_bank, tp.payee_handle,
+  SELECT ti.*, COALESCE(tp.acct, 'OTHER') AS acct, tp.payer_bank, tp.payee_handle, NULLIF(trim(tp.mcc), '') AS mcc,
          CASE WHEN ti.type = 'CREATE' THEN 'CREATE'
               WHEN ti.type = 'COLLECT' AND ti.ex = 1 THEN 'EXEC1'
               WHEN ti.type = 'COLLECT' AND ti.ex > 1 THEN 'EXECR'
@@ -216,34 +224,57 @@ u AS (   -- one row per attempt, latest status
          max_by(status, created_on)        AS status,
          max_by(code, created_on)          AS code,
          max_by(payer_bank, created_on)    AS payer_bank,
-         max_by(payee_handle, created_on)  AS payee_handle
+         max_by(payee_handle, created_on)  AS payee_handle,
+         max_by(mcc, created_on)           AS mcc,
+         max_by(mode, created_on)          AS mode
   FROM j
   WHERE stage IS NOT NULL
   GROUP BY ts, purpose, stage, acct, k
 ),
 g AS (
-  SELECT ts, purpose, stage, acct, status, code,
+  SELECT ts, purpose, stage, acct, CASE WHEN GROUPING(payer_bank, payee_handle) = 3 THEN mode END AS mode, status, code,
          CASE WHEN GROUPING(payer_bank) = 0 THEN 'BANK' WHEN GROUPING(payee_handle) = 0 THEN 'HANDLE' ELSE 'ALL' END  AS dim,
          CASE WHEN GROUPING(payer_bank) = 0 THEN COALESCE(payer_bank, '(unknown)')
               WHEN GROUPING(payee_handle) = 0 THEN COALESCE(payee_handle, '(unknown)') END        AS k,
          count(*)                                                                                  AS c
-  FROM (SELECT ts, purpose, stage, acct, status, CASE WHEN status = 'FAILURE' THEN code END AS code, payer_bank, payee_handle FROM u)
-  GROUP BY GROUPING SETS ((ts, purpose, stage, acct, status, code),
+  FROM (SELECT ts, purpose, stage, acct, mode, status, CASE WHEN status = 'FAILURE' THEN code END AS code, payer_bank, payee_handle FROM u)
+  GROUP BY GROUPING SETS ((ts, purpose, stage, acct, mode, status, code),
                           (ts, purpose, stage, acct, status, code, payer_bank),
                           (ts, purpose, stage, acct, status, code, payee_handle))
 ),
-r AS (
+gk AS (
   SELECT *,
-         sum(c) OVER (PARTITION BY ts, purpose, stage, acct, code, dim)                            AS code_c,
-         row_number() OVER (PARTITION BY ts, purpose, stage, acct, code, dim ORDER BY c DESC, k)   AS rn
+         sum(c) OVER (PARTITION BY ts, purpose, stage, code, dim)                                  AS code_c,
+         sum(c) OVER (PARTITION BY ts, purpose, stage, code, dim, k)                               AS k_c
   FROM g
+),
+r AS (
+  SELECT *, dense_rank() OVER (PARTITION BY ts, purpose, stage, code, dim ORDER BY k_c DESC, k) AS rn
+  FROM gk
+),
+s AS (   -- every attempt by payee MCC / payer bank / payee handle
+  SELECT ts, purpose, stage, acct, status, dim, k, count(*) AS c
+  FROM (SELECT ts, purpose, stage, acct, status, 'MCC' AS dim, COALESCE(mcc, '(unknown)') AS k FROM u
+        UNION ALL SELECT ts, purpose, stage, acct, status, 'PAYER_BANK', COALESCE(payer_bank, '(unknown)') FROM u
+        UNION ALL SELECT ts, purpose, stage, acct, status, 'PAYEE', COALESCE(payee_handle, '(unknown)') FROM u)
+  GROUP BY 1, 2, 3, 4, 5, 6, 7
+),
+sk AS (
+  SELECT ts, purpose, stage, dim, k, row_number() OVER (PARTITION BY ts, purpose, stage, dim ORDER BY sum(c) DESC, k) AS rk
+  FROM s
+  GROUP BY ts, purpose, stage, dim, k
 )
-SELECT ts, purpose, stage, acct, status, code, dim,
+SELECT ts, purpose, stage, acct, mode, status, code, dim,
        CASE WHEN dim = 'ALL' OR rn <= ${MANDATE_SPLIT_TOP} THEN k ELSE 'Other' END  AS k,
        sum(c)                                                                      AS c
 FROM r
 WHERE dim = 'ALL' OR (status = 'FAILURE' AND code_c >= ${MANDATE_SPLIT_MIN})
-GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`;
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+UNION ALL
+SELECT s.ts, s.purpose, s.stage, s.acct, NULL, s.status, NULL, s.dim,
+       CASE WHEN sk.rk <= ${MANDATE_SR_TOP} THEN s.k ELSE 'Other' END, sum(s.c)
+FROM s JOIN sk ON sk.ts = s.ts AND sk.purpose = s.purpose AND sk.stage = s.stage AND sk.dim = s.dim AND sk.k = s.k
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9`;
 
 const runRefundRedash = (sql, opts) => runRedashWithEnv(REFUND_URL_VAR, REFUND_KEY_VAR, REFUND_DATA_SOURCE_ID, sql, { ...opts, timeoutMs: REFUND_DAY_TIMEOUT_MS });
 
@@ -680,13 +711,13 @@ GROUP BY ROLLUP (split)`,
     queries: {
       // Every section slices this: SR by stage × CC / CASA, error codes, bank / handle split.
       daily: {
-        title: "Mandate attempts (day × purpose × stage × payer account × status × code; failures by payer bank / payee handle)",
+        title: "Mandate attempts (day × purpose × stage × payer account × mode × status × code; failures by payer bank / payee handle; SR by MCC / payer bank / payee handle)",
         daily: true,
-        version: 1,
+        version: 3,
         sql: MANDATE_DAY_SQL.replaceAll("{{DAY}}", "{{FROM_DATE}}").replaceAll("{{NEXT_DAY}}", "{{TO_DATE}}"),
         run: async (ctx) => {
           const splitFrom = addDays(ctx.win.toDate, -MANDATE_SPLIT_DAYS);
-          const trimSplit = (rows) => rows.filter((r) => r.dim === "ALL" || r.ts >= splitFrom);
+          const trimSplit = (rows) => rows.filter((r) => (r.dim !== "BANK" && r.dim !== "HANDLE") || r.ts >= splitFrom);
           const rows = await fetchByDay(
             MANDATE_DAY_SQL,
             (r) => ({
@@ -694,13 +725,14 @@ GROUP BY ROLLUP (split)`,
               purpose: r.purpose,
               stage: r.stage,
               acct: r.acct,
+              mode: r.mode ?? null,
               status: r.status,
               code: r.code ?? null,
               dim: r.dim,
               k: r.k ?? null,
               c: num(r.c),
             }),
-            1,
+            3,
             { exec: (sql, opts) => runTrino(sql, { ...opts, timeoutMs: TIMEOUT_MS }), chunkDays: MANDATE_CHUNK_DAYS },
           )({ ...ctx, savePartial: (part, cover) => ctx.savePartial(trimSplit(part), cover) });
           return trimSplit(rows);
@@ -827,10 +859,12 @@ export function registerProductDashboard(app, { dataDir, history = null }) {
       },
       "running",
     );
+    // Rows cached by an older query version have other columns: never merge them with new rows.
+    const sameVersion = () => (cache[product]?.[query]?.version || null) === (spec.version || null) ? cache[product]?.[query] : null;
     // A chunked run() saves what it has so far: merged like a finished daily run, marked partial.
     const savePartial = (rows, cover) => {
       if (signal.aborted) return;
-      const merged = spec.daily ? mergeDaily(cache[product]?.[query], rows, cover, def.maxDays) : { rows, window: cover };
+      const merged = spec.daily ? mergeDaily(sameVersion(), rows, cover, def.maxDays) : { rows, window: cover };
       cache[product] ||= {};
       cache[product][query] = { ...merged, finishedAt: Date.now(), durationMs: Date.now() - startedAt, partial: true, ...(spec.version ? { version: spec.version } : {}) };
       writeJsonFile(cacheFile, cache);
@@ -859,7 +893,7 @@ export function registerProductDashboard(app, { dataDir, history = null }) {
         const dates = [...new Set(kept.map((r) => r.asOf))].sort().slice(-(LITE_SNAPSHOTS_KEPT - 1));
         rows = [...kept.filter((r) => dates.includes(r.asOf)), ...rows.map((r) => ({ ...r, asOf: win.toDate }))];
       } else if (spec.daily) {
-        ({ rows, window: coverage } = mergeDaily(cache[product]?.[query], rows, win, def.maxDays));
+        ({ rows, window: coverage } = mergeDaily(sameVersion(), rows, win, def.maxDays));
       }
       const finishedAt = Date.now();
       cache[product] ||= {};

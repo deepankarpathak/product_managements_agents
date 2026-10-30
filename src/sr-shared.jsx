@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 import BreakdownTable from "./breakdown-table.jsx";
+import { NO_PICK, Picker, applyPick, toPick, useStored } from "./table-pickers.jsx";
 import { ALERT_RULES, buildBreakdown, buildDeclines, computeAlerts, pickYday } from "./breakdown-math.mjs";
 
 // Shared SR dashboard pieces built on the breakdown section (Unified SR Dashboard; moved here
@@ -437,11 +438,15 @@ const csvCell = (v) => {
 };
 
 /** extraCol: optional { label, title, render(code), csv(code) } added after "Δ vs L7D avg" (Unified dashboard). */
-export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick, extraCol = null }) {
+// pickKey: turns on the Rows / Columns pickers (saved per key); defaultHiddenCols: column ids off by default.
+export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick, extraCol = null, pickKey = null, defaultHiddenCols = [] }) {
   const { rows, yday } = useBreakdownData(result);
   const [q, setQ] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [sort, setSort] = useState({ key: "now", dir: -1 });
+  const [rowPick, setRowPick] = useStored(pickKey && `${pickKey}:rows`, NO_PICK);
+  const [hiddenCols, setHiddenCols] = useStored(pickKey && `${pickKey}:cols`, defaultHiddenCols);
+  const showCol = (id) => !pickKey || !hiddenCols.includes(id);
 
   const amtInfo = useMemo(() => {
     const am = {};
@@ -471,7 +476,10 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
 
   if (!data) return <div style={{ padding: 20, color: C.muted, fontSize: 13 }}>No data in the cached breakdown result.</div>;
   const { days, total } = data;
-  const shown = showAll || focus || q ? filtered : filtered.slice(0, 15);
+  // Default rows = top 15 by failures today; the Rows picker adds / removes codes on top of that.
+  const topIds = [...data.rows].sort((a, b) => b.now - a.now).slice(0, 15).map((r) => r.code);
+  const picked = pickKey ? new Set(applyPick(topIds, rowPick)) : null;
+  const shown = showAll || focus || q ? filtered : picked ? filtered.filter((r) => picked.has(r.code)) : filtered.slice(0, 15);
   const dayCols = [
     { key: "d1", label: "D-1", day: days.d1 },
     { key: "d2", label: "D-2", day: days.d2 },
@@ -531,10 +539,10 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
           )}
           {r.descr && <div style={{ fontSize: 11, color: C.muted, fontWeight: 400, lineHeight: 1.35 }}>{r.descr.replace(/_/g, " ")}</div>}
         </td>
-        <td style={{ ...td, color: C.text, fontWeight: 700 }}>{fmtNum(r.now)}</td>
-        <td style={{ ...td, color: C.text2 }}>{fmtInr(r.amount)}</td>
-        <td style={{ ...td, color: C.text2 }}>{r.share == null ? "—" : `${r.share.toFixed(1)}%`}</td>
-        {dayCols.map((c) => {
+        {showCol("now") && <td style={{ ...td, color: C.text, fontWeight: 700 }}>{fmtNum(r.now)}</td>}
+        {showCol("amount") && <td style={{ ...td, color: C.text2 }}>{fmtInr(r.amount)}</td>}
+        {showCol("share") && <td style={{ ...td, color: C.text2 }}>{r.share == null ? "—" : `${r.share.toFixed(1)}%`}</td>}
+        {dayCols.filter((c) => showCol(c.key)).map((c) => {
           const d = r[`${c.key}Δ`];
           return (
             <td key={c.key} style={td}>
@@ -543,17 +551,19 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
             </td>
           );
         })}
-        <td style={{ ...td, color: tone(r.vsAvg, false, 0.05), fontWeight: 600 }}>
-          {fmtSigned(r.vsAvg, "%", 1)}
-          <div style={{ fontSize: 11, color: C.muted, fontWeight: 400 }}>{r.excess > 0 ? `+${fmtNum(r.excess)} vs avg` : `${fmtNum(r.excess)} vs avg`}</div>
-        </td>
-        {extraCol && <td style={{ ...td, textAlign: "left", whiteSpace: "normal", minWidth: 180 }}>{isTotal ? "" : extraCol.render(r.code)}</td>}
+        {showCol("vsAvg") && (
+          <td style={{ ...td, color: tone(r.vsAvg, false, 0.05), fontWeight: 600 }}>
+            {fmtSigned(r.vsAvg, "%", 1)}
+            <div style={{ fontSize: 11, color: C.muted, fontWeight: 400 }}>{r.excess > 0 ? `+${fmtNum(r.excess)} vs avg` : `${fmtNum(r.excess)} vs avg`}</div>
+          </td>
+        )}
+        {extraCol && showCol("extra") && <td style={{ ...td, textAlign: "left", whiteSpace: "normal", minWidth: 180 }}>{isTotal ? "" : extraCol.render(r.code)}</td>}
       </tr>
     );
   };
 
   return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8 }}>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "10px 16px", borderBottom: `1px solid ${C.border}` }}>
         <span style={{ fontSize: 11, color: C.muted }}>
           Failures on <b style={{ color: C.text2 }}>{fmtDay(days.now)}</b> · Δ = now vs that day ·{" "}
@@ -581,6 +591,36 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
           placeholder="Filter code / description…"
           style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, fontSize: 12, padding: "5px 9px", width: 200 }}
         />
+        {pickKey && (
+          <>
+            <Picker
+              label="Rows"
+              title="Add / remove decline codes (default: top 15 by failures; saved in this browser)"
+              items={[...data.rows].sort((a, b) => b.now - a.now).map((r) => ({ id: r.code, sub: `${fmtNum(r.now)} fails · ${r.descr.replace(/_/g, " ")}` }))}
+              visible={applyPick(topIds, rowPick).filter((id) => data.rows.some((r) => r.code === id))}
+              onChange={(ids) => setRowPick(toPick(topIds, ids))}
+              changed={rowPick.hidden.length + rowPick.added.length > 0}
+              onReset={() => setRowPick(NO_PICK)}
+              presets={[5, 10, 30].map((n) => ({ label: `Top ${n}`, ids: [...data.rows].sort((a, b) => b.now - a.now).slice(0, n).map((r) => r.code) })).concat([{ label: "Rising vs L7D", ids: data.rows.filter((r) => r.excess > 0 && r.vsAvg > 10).map((r) => r.code) }])}
+            />
+            <Picker
+              label="Columns"
+              title="Show / hide columns (Excel export keeps every column)"
+              items={[
+                { id: "now", label: "Failures" },
+                { id: "amount", label: "Amount (₹)" },
+                { id: "share", label: "Share" },
+                ...dayCols.map((c) => ({ id: c.key, label: c.label })),
+                { id: "vsAvg", label: "Δ vs L7D avg" },
+                ...(extraCol ? [{ id: "extra", label: extraCol.label }] : []),
+              ]}
+              visible={["now", "amount", "share", ...dayCols.map((c) => c.key), "vsAvg", ...(extraCol ? ["extra"] : [])].filter(showCol)}
+              onChange={(ids) => setHiddenCols(["now", "amount", "share", ...dayCols.map((c) => c.key), "vsAvg", "extra"].filter((k) => !ids.includes(k)))}
+              changed={hiddenCols.join() !== defaultHiddenCols.join()}
+              onReset={() => setHiddenCols(defaultHiddenCols)}
+            />
+          </>
+        )}
         <button type="button" style={pill(false)} onClick={exportCsv} title="Download as CSV (opens in Excel)">
           ⬇ Excel
         </button>
@@ -592,26 +632,34 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
               <th style={{ ...th, textAlign: "left", left: 0, zIndex: 3 }} onClick={() => toggleSort("code")}>
                 Code · NPCI description{arrow("code")}
               </th>
-              <th style={th} onClick={() => toggleSort("now")} title={`Failures on ${fmtDay(days.now)}`}>
-                Failures{arrow("now")}
-              </th>
-              <th style={th} onClick={() => toggleSort("amount")} title="₹ value of failed txns (raw txns, Paytm payer handles)">
-                Amount{arrow("amount")}
-              </th>
-              <th style={th} onClick={() => toggleSort("share")} title="Share of all failures that day">
-                Share{arrow("share")}
-              </th>
-              {dayCols.map((c) => (
+              {showCol("now") && (
+                <th style={th} onClick={() => toggleSort("now")} title={`Failures on ${fmtDay(days.now)}`}>
+                  Failures{arrow("now")}
+                </th>
+              )}
+              {showCol("amount") && (
+                <th style={th} onClick={() => toggleSort("amount")} title="₹ value of failed txns (raw txns, Paytm payer handles)">
+                  Amount{arrow("amount")}
+                </th>
+              )}
+              {showCol("share") && (
+                <th style={th} onClick={() => toggleSort("share")} title="Share of all failures that day">
+                  Share{arrow("share")}
+                </th>
+              )}
+              {dayCols.filter((c) => showCol(c.key)).map((c) => (
                 <th key={c.key} style={th} onClick={() => toggleSort(`${c.key}Δ`)} title={`${fmtDay(c.day)}${c.key === "lw" ? " (same weekday last week)" : ""}; below: now vs that day, %`}>
                   {c.label}
                   {arrow(`${c.key}Δ`)}
                   <div style={{ fontSize: 9, color: C.muted, fontWeight: 500, textTransform: "none" }}>count · Δ now</div>
                 </th>
               ))}
-              <th style={th} onClick={() => toggleSort("vsAvg")} title="Now vs L7D daily average, %">
-                Δ vs L7D avg{arrow("vsAvg")}
-              </th>
-              {extraCol && (
+              {showCol("vsAvg") && (
+                <th style={th} onClick={() => toggleSort("vsAvg")} title="Now vs L7D daily average, %">
+                  Δ vs L7D avg{arrow("vsAvg")}
+                </th>
+              )}
+              {extraCol && showCol("extra") && (
                 <th style={{ ...th, textAlign: "left", cursor: "default" }} title={extraCol.title}>
                   {extraCol.label}
                 </th>
@@ -632,7 +680,7 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
           </tbody>
         </table>
       </div>
-      {!showAll && !focus && !q && filtered.length > 15 && (
+      {!showAll && !focus && !q && filtered.length > shown.length && (
         <div style={{ padding: "8px 16px", fontSize: 12 }}>
           <span style={{ color: C.accent, cursor: "pointer" }} onClick={() => setShowAll(true)}>
             Show all {filtered.length} codes
