@@ -166,6 +166,7 @@ const csvCell = (v) => {
  * onCodeClick(code): decline-code click (default: focus this table on that code).
  * focusCode: show which rows drive this code (adds count + trend columns, filters, sorts by it).
  * Typing an exact code in the filter box focuses on it the same way.
+ * onFocusChange(code | null): told whenever the focused code changes (e.g. to load its untrimmed rows).
  */
 export default function BreakdownTable({
   rows,
@@ -179,6 +180,7 @@ export default function BreakdownTable({
   onCodeClick = null,
   focusCode = null,
   onClearFocus = null,
+  onFocusChange = null,
   // Optional: make row names clickable — onDimClick(kind, dim). Overall is never clickable.
   onDimClick = null,
   // Optional: LMTD reference — { label, days, byKind: { [kind]: { [dim | "__ALL__"]: { total, success } } } }.
@@ -222,6 +224,8 @@ export default function BreakdownTable({
   // A new focus code re-sorts by that code's failures.
   useEffect(() => {
     setSort(focus ? { key: "focus", dir: -1 } : { key: "impact", dir: 1 });
+    onFocusChange?.(focus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus]);
   const nameOf = (dim) => (labelOf ? labelOf(kind, dim) : null);
   const isSr = metric === "sr";

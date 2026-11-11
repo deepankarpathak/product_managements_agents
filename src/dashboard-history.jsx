@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// History — every Morning Dashboard / Success Rate Snippet query run (manual + scheduled),
+// History — every dashboard query run (manual + scheduled): Unified SR, Product Wise, Skills, plus old
+// records of the retired Morning Dashboard and Success Rate Snippet (merged 11 Nov 2026 into Unified SR P2M),
 // read from backend /api/history/*. The list loads only light index entries for the
 // chosen date range (default: last 3 days); an item's full output is fetched on click.
 // Records live as Markdown in Query_Agent/AnaylsisAgent_output/history/YYYY-MM-DD/.
@@ -414,8 +415,8 @@ export default function DashboardHistory({ active = true }) {
             <select style={input} value={dashboard} onChange={(e) => setDashboard(e.target.value)}>
               <option value="all">All dashboards</option>
               <option value="morning">Morning Dashboard (retired)</option>
+              <option value="srsnippet">Success Rate Snippet (retired → Unified SR P2M)</option>
               <option value="unified">Unified SR Dashboard</option>
-              <option value="srsnippet">Success Rate Snippet</option>
               <option value="product">Product Wise</option>
               <option value="skills">Skills (Utilities)</option>
             </select>

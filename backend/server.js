@@ -12,6 +12,7 @@ import os from "os";
 import * as XLSX from "xlsx";
 import { fileURLToPath } from "url";
 import multer from "multer";
+import compression from "compression";
 import mammoth from "mammoth";
 import { Document, Packer, Paragraph, HeadingLevel } from "docx";
 import { extractTextFromPDF, extractTextFromPDFBuffer } from "./pdfParser.js";
@@ -21,10 +22,17 @@ import { buildDocsKnowledgeContext } from "./docsKnowledge.js";
 import { registerSrSnippet } from "./srSnippet.js";
 import { registerUnifiedDashboard } from "./unifiedDashboard.js";
 import { registerUnifiedDrill } from "./unifiedDrill.js";
+import { registerAcquiringSr } from "./acquiringSr.js";
 import { registerProductDashboard } from "./productDashboard.js";
+import { registerApd } from "./apdRunner.js";
+import { registerErrorSheet } from "./errorSheet.js";
 import { registerUtilities } from "./utilities.js";
+import { registerKibanaLogs } from "./kibanaLogs.js";
+import { registerKibanaAsk } from "./kibanaAsk.js";
+import { claudeCliPath, claudeCliStatus, cliModelFor, runClaudeCliOnce } from "./claudeCli.js";
 import { registerSpecSearch, retrieveSpecContext } from "./specSearch.js";
 import { registerPmHome } from "./pmHome.js";
+import { registerTxnBreakup } from "./txnBreakup.js";
 import { registerSkills } from "./skillRunner.js";
 import { createHistoryStore, registerHistory } from "./historyStore.js";
 import {
@@ -143,7 +151,11 @@ const llmProviderHealth = {
   openai: { configured: false, ok: null, error: null, at: null },
   gemini: { configured: false, ok: null, error: null, at: null },
   anthropic: { configured: false, ok: null, error: null, at: null },
+  claudeCli: { configured: false, ok: null, error: null, at: null },
 };
+
+/** Request body llmProvider → "claude-cli" for any spelling of the Claude CLI channel. */
+const isClaudeCliProvider = (v) => ["claude-cli", "claudecli", "claude_cli", "cli"].includes(String(v || "").toLowerCase());
 
 /**
  * Lightweight in-memory usage stats (last 24h) for UI.
@@ -411,7 +423,16 @@ function buildLlmProvidersPayload() {
     at: llmProviderHealth.anthropic.at,
     usage24h: usage.anthropic || null,
   };
-  return [bedrock, foundry, openai, gemini, anthropicHealth];
+  const claudeCli = {
+    id: "claude-cli",
+    label: "Claude CLI",
+    configured: llmProviderHealth.claudeCli.configured,
+    ok: llmProviderHealth.claudeCli.ok,
+    error: llmProviderHealth.claudeCli.error,
+    at: llmProviderHealth.claudeCli.at,
+    usage24h: usage["claude-cli"] || null,
+  };
+  return [bedrock, foundry, openai, gemini, anthropicHealth, claudeCli];
 }
 
 async function probeAnthropicLlm() {
@@ -447,8 +468,14 @@ async function probeAnthropicLlm() {
   }
 }
 
+/** Claude CLI: login check only (`claude auth status`) — no tokens spent. */
+async function probeClaudeCliLlm() {
+  const st = await claudeCliStatus();
+  llmProviderHealth.claudeCli = { configured: st.configured, ok: st.ok, error: st.error, at: Date.now() };
+}
+
 async function runNonBedrockLlmProbes() {
-  await Promise.all([probeFoundryLlm(), probeOpenAiLlm(), probeGeminiLlm(), probeAnthropicLlm()]);
+  await Promise.all([probeFoundryLlm(), probeOpenAiLlm(), probeGeminiLlm(), probeAnthropicLlm(), probeClaudeCliLlm()]);
 }
 
 function scoreFoundryBaseUrl() {
@@ -740,6 +767,14 @@ function extractGoogleSheetUrlsFromText(text) {
 const app = express();
 
 app.use(cors());
+// gzip every response over 1 KB (dashboard /state payloads are 1–40 MB of JSON; APD page CSVs too), except SSE
+// streams (Lumina / Kibana Ask), which must reach the browser event by event.
+app.use(
+  compression({
+    threshold: 1024,
+    filter: (req, res) => !String(res.getHeader("Content-Type") || "").includes("text/event-stream") && compression.filter(req, res),
+  })
+);
 app.use(express.json({ limit: "10mb" }));
 
 /** Log each /api request (method, path, status, duration). Stdout goes to .claude/main-dev.log when using npm run dev. Disable with PRD_AGENT_HTTP_LOG=0. */
@@ -829,8 +864,11 @@ app.post("/api/generate", async (req, res) => {
     const disableAws = String(llmDisabled.aws || "").toLowerCase() === "true";
     const disableFoundry = String(llmDisabled.foundry || "").toLowerCase() === "true";
     const disableOpenai = String(llmDisabled.openai || "").toLowerCase() === "true";
+    const disableClaudeCli = String(llmDisabled.claudeCli || "").toLowerCase() === "true";
     const llmMode =
-      requested === "auto" || requested === "fallback"
+      isClaudeCliProvider(requested)
+        ? "claude-cli"
+        : requested === "auto" || requested === "fallback"
         ? "auto"
         : requested === "foundry"
           ? "foundry"
@@ -1098,9 +1136,39 @@ app.post("/api/generate", async (req, res) => {
       return { provider: "anthropic", data: r, model: anthropicModel, ...toks };
     };
 
+    // Claude CLI channel: local Claude Code login (claude -p), no API key. Text-only.
+    const cliAbort = new AbortController();
+    res.on("close", () => {
+      if (!res.writableFinished) cliAbort.abort();
+    });
+    const tryClaudeCli = async () => {
+      if (!claudeCliPath()) {
+        const err = new Error("Claude CLI not found — install Claude Code (and log in) or set CLAUDE_CLI_PATH.");
+        err.code = "CLAUDE_CLI_NOT_CONFIGURED";
+        throw err;
+      }
+      const cliModel = cliModelFor({ model: modelFromBody, tier: bedrockModelTier });
+      const started = Date.now();
+      try {
+        const data = await runClaudeCliOnce({ system: incomingSystem || undefined, messages, model: cliModel, signal: cliAbort.signal });
+        const toks = { promptTokens: data.usage?.input_tokens || 0, completionTokens: data.usage?.output_tokens || 0 };
+        recordLlmUsageEvent({ provider: "claude-cli", ok: true, ms: Date.now() - started, agent, model: data.model || cliModel, ...toks });
+        try { recordAgentDayUsage({ agent, provider: "claude-cli", model: String(data.model || cliModel), ...toks }); } catch (e) { void e; }
+        console.log(`[${new Date().toISOString()}] [api/generate] provider=claude-cli model=${data.model || cliModel}`);
+        return { provider: "claude-cli", data, model: data.model || cliModel, ...toks };
+      } catch (e) {
+        recordLlmUsageEvent({ provider: "claude-cli", ok: false, ms: Date.now() - started, error: e.message, agent, model: cliModel });
+        const err = new Error(e.message);
+        err.code = "CLAUDE_CLI_ERROR";
+        throw err;
+      }
+    };
+
     const order =
-      llmMode === "auto"
-        ? ["aws", "foundry", "openai", "anthropic"]
+      llmMode === "claude-cli"
+        ? ["claude-cli"]
+        : llmMode === "auto"
+        ? ["aws", "foundry", "openai", "anthropic", "claude-cli"]
         : llmMode === "foundry"
           ? ["foundry"]
           : llmMode === "openai"
@@ -1123,8 +1191,12 @@ app.post("/api/generate", async (req, res) => {
         tried.push("foundry(disabled)");
         continue;
       }
+      if (p === "claude-cli" && disableClaudeCli) {
+        tried.push("claude-cli(disabled)");
+        continue;
+      }
       try {
-        const result = p === "aws" ? await tryAws() : p === "openai" ? await tryOpenAi() : p === "anthropic" ? await tryAnthropic() : await tryFoundry();
+        const result = p === "aws" ? await tryAws() : p === "openai" ? await tryOpenAi() : p === "anthropic" ? await tryAnthropic() : p === "claude-cli" ? await tryClaudeCli() : await tryFoundry();
         const llmModel = result.model || (result.provider === "aws" ? modelFromBody || bedrockModelTier || "default" : "default");
         console.log(`[${new Date().toISOString()}] [api/generate] ✓ provider=${result.provider} model=${llmModel} ms=${Date.now() - startedAt}`);
         return res.json({ success: true, data: result.data, llmProvider: result.provider, llmTried: tried, llmModel });
@@ -1157,12 +1229,24 @@ app.post("/api/claude", async (req, res) => {
       if (ragChunks.length > 0) incomingSystem = (incomingSystem || "") + specRagBlock(ragChunks);
     }
     const requestedProvider = String(req.body?.llmProvider || process.env.LLM_PROVIDER_DEFAULT || "aws").toLowerCase();
-    const llmProvider = requestedProvider === "foundry" ? "foundry" : requestedProvider === "anthropic" ? "anthropic" : "aws";
+    const llmProvider = requestedProvider === "foundry" ? "foundry" : requestedProvider === "anthropic" ? "anthropic" : isClaudeCliProvider(requestedProvider) ? "claude-cli" : "aws";
     const modelFromBody = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : null;
     const bedrockModelTier =
       typeof req.body?.bedrockModelTier === "string" && req.body.bedrockModelTier.trim()
         ? req.body.bedrockModelTier.trim()
         : null;
+
+    if (llmProvider === "claude-cli") {
+      if (!claudeCliPath()) return res.status(503).json({ error: { message: "Claude CLI not found — install Claude Code or set CLAUDE_CLI_PATH." } });
+      const ac = new AbortController();
+      res.on("close", () => {
+        if (!res.writableFinished) ac.abort();
+      });
+      const cliModel = cliModelFor({ model: modelFromBody, tier: bedrockModelTier });
+      console.log(`[${new Date().toISOString()}] [api/claude] provider=claude-cli model=${cliModel}`);
+      const data = await runClaudeCliOnce({ system: incomingSystem || undefined, messages, model: cliModel, signal: ac.signal });
+      return res.json({ ...data, role: "assistant", type: "message" });
+    }
 
     if (llmProvider === "anthropic") {
       const ANTHROPIC_API_KEY_CLAUDE = process.env.ANTHROPIC_API_KEY || "";
@@ -1348,7 +1432,11 @@ app.post("/api/alpha/chat", async (req, res) => {
     let reply = "";
     let llmProvider = requested;
 
-    if (requested === "anthropic" && ANTHROPIC_API_KEY) {
+    if (isClaudeCliProvider(requested) && claudeCliPath()) {
+      const data = await runClaudeCliOnce({ system: systemPrompt, messages, model: cliModelFor({ tier: req.body?.bedrockModelTier }) });
+      reply = data.content?.[0]?.text || "";
+      llmProvider = "claude-cli";
+    } else if (requested === "anthropic" && ANTHROPIC_API_KEY) {
       const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
       const r = await anthropic.messages.create({
         model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
@@ -1390,6 +1478,10 @@ app.post("/api/alpha/chat", async (req, res) => {
       });
       reply = r.content?.[0]?.text || "";
       llmProvider = "anthropic";
+    } else if (claudeCliPath()) {
+      const data = await runClaudeCliOnce({ system: systemPrompt, messages, model: cliModelFor({ tier: req.body?.bedrockModelTier }) });
+      reply = data.content?.[0]?.text || "";
+      llmProvider = "claude-cli";
     } else {
       return res.status(503).json({ success: false, error: "No LLM provider configured" });
     }
@@ -1580,6 +1672,7 @@ app.get("/api/connectors/status", (req, res) => {
     llmFoundryConfigured: !!(LLM_API_KEY && LLM_URL),
     llmOpenAiConfigured: !!OPENAI_API_KEY,
     llmAnthropicConfigured: llmProviderHealth.anthropic.configured,
+    llmClaudeCliConfigured: !!claudeCliPath(),
     llmProviders: buildLlmProvidersPayload(),
     jira: !!(JIRA_EMAIL && JIRA_TOKEN && sites.length > 0),
     jiraSites: sites,
@@ -3244,14 +3337,22 @@ app.post("/api/notify/analyst", async (req, res) => {
 const dashboardHistory = createHistoryStore({ rootDir: path.join(__dirname, "..", "Query_Agent", "AnaylsisAgent_output", "history") });
 
 // Success Rate Snippet (P2M PSP / errors / instrument, D-1 vs L7D / MTD vs LMTD) — /api/srsnippet/*
-const srSnippet = registerSrSnippet(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
+// SR Snippet reads the Unified SR cache (P2M slice) — the getter is called per request, after Unified SR is registered below.
+const srSnippet = registerSrSnippet(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory, unified: () => unifiedDashboard });
 
 // Unified SR Dashboard (Morning Dashboard + SR Snippet merged; replaces the retired Morning Dashboard) — /api/udash/*
 const unifiedDashboard = registerUnifiedDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
 registerUnifiedDrill(app, { dataDir: path.join(__dirname, "data") });
+// Acquiring SR page (#acqsr): live port of PTYBL Redash dashboard 95 + day-level collector — /api/acq/*
+const acquiringSr = registerAcquiringSr(app, { dataDir: path.join(__dirname, "data") });
 
 // Product Wise dashboard (UPI International activation / txns / errors / countries) — /api/product/*
 const productDashboard = registerProductDashboard(app, { dataDir: path.join(__dirname, "data"), history: dashboardHistory });
+
+// Automatic Payments Dashboard (third_party/apd_installer: Mandate / CC Autopay / CC vs CASA / Interop / UPI Global / ICCW) — /api/apd/*
+const apd = registerApd(app);
+// Error-code sheet (response_mapper export + app messages in code descriptions) — /api/product/error-sheet*
+registerErrorSheet(app, { dataDir: path.join(__dirname, "data") });
 
 // Utilities → Skills (PRD / BRD / UAT generators saved to History; UMN lookup is not) — /api/utils/skills/*
 const skills = registerSkills(app, { history: dashboardHistory });
@@ -3266,11 +3367,16 @@ registerHistory(app, {
 });
 registerUtilities(app);
 
+// Kibana Logs: identifier search over TSP / TPAP Kibana (console proxy, VPN) — /api/kibana/*
+registerKibanaLogs(app);
+registerKibanaAsk(app);
+
 // NPCI Spec Search: keyword index over docs/npci-tsd + docs/npci-circular — /api/spec/*
 registerSpecSearch(app);
 
 // PM Console home summary + Jarvis (ai-tools.finmate.tech) agents: HSS, SR Dissection, Success-Rate, Lumina, Txn Tracer — /api/home/*, /api/jarvis/*
-registerPmHome(app, { dataDir: path.join(__dirname, "data") });
+const txnBreakup = registerTxnBreakup(app, { dataDir: path.join(__dirname, "data") });
+registerPmHome(app, { dataDir: path.join(__dirname, "data"), sources: { unified: unifiedDashboard, product: productDashboard, acq: acquiringSr, apd, txnBreakup } });
 
 // Production: serve frontend build from parent directory (single deploy)
 const buildPath = path.join(__dirname, "..", "build");

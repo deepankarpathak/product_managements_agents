@@ -4,7 +4,9 @@ import { getBedrockModelTierForRequest, getLlmDisabledForRequest, getLlmProvider
 // Utilities — ad-hoc lookup tools. Talks to backend /api/utils/*.
 // Each tool runs on demand (nothing runs on page open): Trino lookups, PRD / BRD / UAT
 // generators (/api/utils/skills/run, saved to History), UMN lookup (/api/utils/skills/umn),
-// merchant details by MID / VPA (/api/utils/merchant) and NPCI Spec Search over the TSD +
+// merchant details by MID / VPA (/api/utils/merchant), error definitions from TPAP
+// response_code_translator + response_mapper +
+// NPCI knowledge base (/api/utils/error-codes) and NPCI Spec Search over the TSD +
 // Consolidated Circular Markdown (/api/spec/*; bookmark as #utilities?spec=<query>).
 
 const API = "/api/utils";
@@ -687,6 +689,201 @@ function MerchantLookup({ index }) {
   );
 }
 
+// ─── Error Definition (TPAP Redash response_mapper + NPCI knowledge base) ────
+
+const wrap = (v, w = 280) => <div style={{ whiteSpace: "normal", minWidth: w, maxWidth: 420, lineHeight: 1.45 }}>{dash(v)}</div>;
+
+const chip = (text, color) => (
+  <span style={{ display: "inline-block", fontSize: 11, fontWeight: 600, padding: "1px 7px", borderRadius: 10, border: `1px solid ${color}55`, background: `${color}1a`, color, marginRight: 4 }}>{text}</span>
+);
+const MATCH_COLOR = { app_code: "#86efac", npci_code: "#93c5fd", resp_code: "#86efac" };
+
+// Partner codes from response_code_translator — a column shows only when some row has a value.
+const TRANSLATOR_CODE_COLS = ["npci_code", "risk_code", "switch_code", "pg_code", "juspay_code", "mindgate_code", "wallet_code", "ps_code", "cbs_code"];
+const fmtTime = (v) => dash(v && String(v).slice(0, 16).replace("T", " "));
+
+const translatorColumns = (rows) => [
+  { key: "app_code", label: "app_code", align: "left", render: (r) => dash(r.app_code) },
+  ...TRANSLATOR_CODE_COLS.filter((k) => k === "npci_code" || rows.some((r) => r[k] != null && r[k] !== "")).map((k) => ({ key: k, label: k, align: "left", render: (r) => dash(r[k]) })),
+  { key: "updated_on", label: "Updated", align: "left", render: (r) => fmtTime(r.updated_on) },
+];
+
+const RESP_MAPPER_COLUMNS = [
+  { key: "type", label: "Type", align: "left" },
+  { key: "response_constant", label: "Response constant", align: "left" },
+  { key: "resp_msg", label: "Message", align: "left", render: (r) => wrap(r.dynamic_resp_msg || r.resp_msg) },
+  { key: "title", label: "Title", align: "left", render: (r) => wrap(r.title || r.fallback_title, 200) },
+  { key: "subtitle", label: "Subtitle", align: "left", render: (r) => wrap(r.subtitle || r.fallback_subtitle) },
+  { key: "place_holders", label: "Placeholders", align: "left", render: (r) => dash([r.place_holders, r.subtitle_place_holders].filter(Boolean).join(" · ")) },
+  { key: "updated_on", label: "Updated", align: "left", render: (r) => fmtTime(r.updated_on) },
+];
+// NPCI → app_code rows come from several app codes, so the code leads.
+const RESP_MAPPER_LINKED_COLUMNS = [{ key: "resp_code", label: "app_code", align: "left" }, ...RESP_MAPPER_COLUMNS];
+
+const KB_SOURCE_LABEL = { errcodes: "NPCI Error Codes V2.9", frm: "NPCI FRM rules / EFRM M16 models" };
+
+function Question({ n, q, source, children }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingLeft: 10, borderLeft: `2px solid ${C.border}` }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: C.text }}>
+        {n} · {q} <span style={{ fontWeight: 400, color: C.muted }}>— {source}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function KbEntries({ entries }) {
+  if (!entries.length) return <div style={{ fontSize: 12, color: C.muted }}>Not in the NPCI knowledge base</div>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {entries.map((e, i) => (
+        <div key={i} style={{ fontSize: 12, padding: "6px 10px", background: C.card2, border: `1px solid ${C.border}`, borderRadius: 6, lineHeight: 1.5 }}>
+          <b style={{ fontFamily: "ui-monospace, monospace" }}>{e.code}</b>
+          {e.tdbd && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color: e.tdbd === "TD" ? "#fcd34d" : "#93c5fd" }}>{e.tdbd}</span>}
+          <span style={{ marginLeft: 8, color: C.text }}>{e.desc}</span>
+          <div style={{ fontSize: 11, color: C.muted }}>
+            {KB_SOURCE_LABEL[e.source] || e.source} · {e.section}
+            {e.page ? ` · p.${e.page}` : ""}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ErrorCodeResult({ r }) {
+  if (!r.found) {
+    return (
+      <div style={{ padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12 }}>
+        <b>{r.code}</b> <span style={{ color: "#fca5a5" }}>— not in response_code_translator, response_mapper or the NPCI knowledge base</span>
+      </div>
+    );
+  }
+  const isApp = r.becomes.length > 0;
+  const isNpci = !!r.npci;
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "baseline" }}>
+        <b style={{ fontSize: 14, fontFamily: "ui-monospace, monospace" }}>{r.code}</b>
+        <span>
+          {chip(isApp ? "is app_code" : "not app_code", isApp ? MATCH_COLOR.app_code : C.muted)}
+          {chip(isNpci ? "is npci_code" : "not npci_code", isNpci ? MATCH_COLOR.npci_code : C.muted)}
+        </span>
+        <a href={`#utilities?spec=${encodeURIComponent(r.code)}`} style={{ fontSize: 11, color: C.accent }}>
+          Open in Spec Search ↓
+        </a>
+      </div>
+      <Question n={1} q="Which code does this become in NPCI / switch / PG?" source="response_code_translator (app_code)">
+        <Table columns={translatorColumns(r.becomes)} rows={r.becomes} empty={`${r.code} is not an app_code in response_code_translator`} />
+      </Question>
+      <Question n={2} q="What does the user see for this code?" source="response_mapper (resp_code)">
+        <Table columns={RESP_MAPPER_COLUMNS} rows={r.userSees} empty={`No response_mapper row for ${r.code}`} />
+      </Question>
+      {isNpci && (
+        <Question n={3} q="What does this NPCI code mean, and what does the user see?" source="NPCI knowledge base → response_code_translator (npci_code) → response_mapper">
+          <KbEntries entries={r.npci.meaning} />
+          <div style={{ fontSize: 12, color: C.text2 }}>
+            Maps to app_code:{" "}
+            {r.npci.appCodes.length ? r.npci.appCodes.map((c) => <span key={c}>{chip(c, MATCH_COLOR.app_code)}</span>) : <span style={{ color: C.muted }}>{r.npci.translator.length ? "same code (app_code = npci_code)" : "none in response_code_translator"}</span>}
+          </div>
+          {r.npci.appCodes.length > 0 && <Table columns={RESP_MAPPER_LINKED_COLUMNS} rows={r.npci.userSees} empty="No response_mapper row for these app_codes" />}
+        </Question>
+      )}
+      {!isNpci && r.kb.length > 0 && (
+        <Question n={3} q="Knowledge base" source="NPCI FRM rules / EFRM M16 models">
+          <KbEntries entries={r.kb} />
+        </Question>
+      )}
+    </div>
+  );
+}
+
+function ErrorDefinition({ index }) {
+  const [text, setText] = useState(() => lsGet("errorCodes", ""));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [result, setResult] = useState(null);
+  const [showSql, setShowSql] = useState(false);
+  const abortRef = useRef(null);
+  const codes = useMemo(() => [...new Set(text.split(/[\s,;]+/).map((c) => c.trim().replace(/^'|'$/g, "").toUpperCase()).filter(Boolean))], [text]);
+
+  const lookup = async () => {
+    if (!codes.length || busy) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setBusy(true);
+    setErr(null);
+    lsSet("errorCodes", text);
+    try {
+      setResult(await api("/error-codes", { method: "POST", body: { codes }, signal: controller.signal }));
+    } catch (e) {
+      if (e.name !== "AbortError") setErr(e.message);
+    } finally {
+      setBusy(false);
+      abortRef.current = null;
+    }
+  };
+
+  return (
+    <section style={card}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "baseline", marginBottom: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>{index} · Error Definition</h2>
+        <span style={{ fontSize: 11, color: C.muted }}>app_code / npci_code mapping (response_code_translator) + user-facing messages (response_mapper) · upi_config, TPAP Redash + NPCI error-code / FRM / M16 model definitions · not saved to History</span>
+      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          lookup();
+        }}
+        style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start", marginBottom: 12 }}
+      >
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) lookup();
+          }}
+          placeholder={"One or more error codes — newline, space or comma separated\nINT-9661, U16, ZM, U16-00972, M16-01278"}
+          aria-label="Error codes"
+          rows={3}
+          style={{ ...field, flex: "1 1 360px", resize: "vertical", fontFamily: "ui-monospace, monospace", fontSize: 12 }}
+        />
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <button type="submit" style={btn("primary")} disabled={busy || !codes.length}>
+            {busy ? "Fetching…" : `Fetch${codes.length > 1 ? ` ${codes.length}` : ""}`}
+          </button>
+          {busy && (
+            <button type="button" style={btn("danger")} onClick={() => abortRef.current?.abort()}>
+              ■ Stop
+            </button>
+          )}
+          {result && (
+            <button type="button" style={btn()} onClick={() => setShowSql((s) => !s)}>
+              {showSql ? "Hide SQL" : "Show SQL"}
+            </button>
+          )}
+        </div>
+      </form>
+      {err && <div style={{ color: "#fca5a5", fontSize: 12, marginBottom: 12 }}>{err}</div>}
+      {showSql && result && (
+        <pre style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, fontSize: 11, color: C.text2, overflowX: "auto", marginBottom: 12 }}>{result.sql}</pre>
+      )}
+      {result && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ fontSize: 11, color: C.muted }}>
+            {result.results.filter((r) => r.found).length}/{result.results.length} found · {(result.ms / 1000).toFixed(1)}s
+          </div>
+          {result.tpapError && <div style={{ color: "#fcd34d", fontSize: 12 }}>TPAP Redash unavailable — showing knowledge base only: {result.tpapError}</div>}
+          {result.results.map((r) => (
+            <ErrorCodeResult key={r.code} r={r} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ─── NPCI Spec Search (TSD + Consolidated Circular) ─────────────────────────
 
 const SPEC_API = "/api/spec";
@@ -695,10 +892,13 @@ const SPEC_SOURCES = [
   { id: "tsd", label: "TSD" },
   { id: "circular", label: "Circular" },
   { id: "errcodes", label: "Error codes" },
+  { id: "frm", label: "FRM rules + M16" },
 ];
-const SPEC_EXAMPLES = ["ReqPay", "U16", "Z9", "ReqMandate", "safety switch", "settlement cycle", "check transaction status", "UPI Circle", "P2PM MCC 7407"];
-const SPEC_TINT = { tsd: "#38bdf8", circular: "#f59e0b", errcodes: "#f87171" };
-const SPEC_TAG = { tsd: "TSD", circular: "Circular", errcodes: "Codes" };
+const SPEC_EXAMPLES = ["ReqPay", "U16", "Z9", "ReqMandate", "safety switch", "settlement cycle", "check transaction status", "UPI Circle", "M16-01278", "P2PM MCC 7407"];
+const SPEC_TINT = { tsd: "#38bdf8", circular: "#f59e0b", errcodes: "#f87171", frm: "#c084fc" };
+const SPEC_TAG = { tsd: "TSD", circular: "Circular", errcodes: "Codes", frm: "FRM" };
+// Sources without a PDF (page markers there are notice pages / sheet rows).
+const SPEC_NO_PDF = new Set(["notices", "frm"]);
 
 async function specApi(pathAndQuery) {
   const res = await fetch(`${SPEC_API}${pathAndQuery}`);
@@ -910,7 +1110,7 @@ function SpecSection({ id, terms }) {
           <button type="button" style={btn()} disabled={!sec.nextId} onClick={() => onNavigate(sec.nextId)}>
             Next →
           </button>
-          {sec.page != null && (
+          {sec.page != null && !SPEC_NO_PDF.has(sec.source) && (
             <a href={`${SPEC_API}/pdf/${sec.source}#page=${sec.page}`} target="_blank" rel="noreferrer" style={{ ...btn(), textDecoration: "none" }}>
               Open PDF {specPages(sec)} ↗
             </a>
@@ -1038,7 +1238,7 @@ function SpecSearch({ index }) {
       {result?.codes?.length > 0 && (
         <div style={{ border: `1px solid ${SPEC_TINT.errcodes}66`, borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: SPEC_TINT.errcodes, padding: "6px 10px", background: C.card2 }}>
-            Code definitions · NPCI UPI Error and Response Codes V2.9
+            Code definitions · NPCI UPI Error and Response Codes V2.9 · NPCI FRM rules · EFRM M16 models
           </div>
           <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
             <tbody>
@@ -1052,9 +1252,13 @@ function SpecSearch({ index }) {
                     </td>
                     <td style={{ padding: "6px 10px", color: C.muted, fontSize: 11 }}>{e.section}</td>
                     <td style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>
-                      <a href={`${SPEC_API}/pdf/errcodes#page=${e.page}`} target="_blank" rel="noreferrer" style={{ color: C.text2, fontSize: 11 }}>
-                        p.{e.page} ↗
-                      </a>
+                      {e.source === "frm" ? (
+                        <span style={{ color: C.muted, fontSize: 11 }}>row {e.page}</span>
+                      ) : (
+                        <a href={`${SPEC_API}/pdf/errcodes#page=${e.page}`} target="_blank" rel="noreferrer" style={{ color: C.text2, fontSize: 11 }}>
+                          p.{e.page} ↗
+                        </a>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -1112,7 +1316,8 @@ export default function Utilities() {
         {SHOW_DOC_GENERATORS && <SkillGenerators />}
         <UmnLookup />
         <MerchantLookup index={SHOW_DOC_GENERATORS ? 4 : 3} />
-        <SpecSearch index={SHOW_DOC_GENERATORS ? 5 : 4} />
+        <ErrorDefinition index={SHOW_DOC_GENERATORS ? 5 : 4} />
+        <SpecSearch index={SHOW_DOC_GENERATORS ? 6 : 5} />
       </main>
     </div>
   );

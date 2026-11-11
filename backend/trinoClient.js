@@ -187,13 +187,13 @@ export const sleep = (ms, signal) =>
  * Run one SQL on a Redash instance chosen by an env pair (URL + key always read from
  * the same pair). Used by Product Wise for sources outside the morning-dashboard config.
  */
-export function runRedashWithEnv(urlVar, keyVar, dataSourceId, sql, { signal, timeoutMs = 15 * 60 * 1000 } = {}) {
+export function runRedashWithEnv(urlVar, keyVar, dataSourceId, sql, { signal, timeoutMs = 15 * 60 * 1000, onJobStatus } = {}) {
   const env = { url: String(process.env[urlVar] || "").trim().replace(/\/+$/, ""), key: process.env[keyVar] || "" };
   if (!env.url || !env.key) return Promise.reject(new Error(`Redash not configured (set ${urlVar} + ${keyVar} in .env)`));
-  return runRedashOnce(env, dataSourceId, sql, { signal, timeoutMs });
+  return runRedashOnce(env, dataSourceId, sql, { signal, timeoutMs, onJobStatus });
 }
 
-export async function runRedashOnce(env, dataSourceId, sql, { signal, timeoutMs }) {
+export async function runRedashOnce(env, dataSourceId, sql, { signal, timeoutMs, onJobStatus }) {
   if (!env.url || !env.key) throw new Error("Redash not configured (set PTYES_REDASH_URL + PTYES_REDASH_API_KEY in .env)");
   const headers = { Authorization: `Key ${env.key}`, "Content-Type": "application/json" };
   const deadline = Date.now() + timeoutMs;
@@ -217,6 +217,7 @@ export async function runRedashOnce(env, dataSourceId, sql, { signal, timeoutMs 
       payload = await readJson(res);
       const job = payload.job || {};
       if (process.env.MDASH_DEBUG) console.log("[mdash:redash] job", jobId, job.status, job.error || "");
+      onJobStatus?.(job.status);
       if (job.status === 3) resultId = job.query_result_id;
       else if (job.status === 4) throw new Error(job.error || "Redash job failed");
       else if (job.status === 5) throw new Error("Redash job cancelled");

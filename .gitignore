@@ -13,9 +13,18 @@
 /backend/agent-exports
 /Query_Agent
 /docs/*
+/third_party/apd_installer
+/premium/artifacts/investigations/
+
+escalation-drafts/
+uat-signoffs/
+premium/artifacts/investigations/
+premium/jira/tickets.md
 
 # testing
 /coverage
+/escalation-drafts/*
+/uat-signoffs/
 
 # production
 /build
@@ -81,3 +90,19 @@ mcp/jira-mcp/
 premium/artifacts/briefs/
 premium/artifacts/data/
 premium/sessions/*.md
+
+# Automatic Payments Dashboard (third_party/apd_installer): code is tracked, pulled data / caches / logs are not
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/cache/
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/data/
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/logs/
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/.lock/
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/*/cache/
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/*/data/
+/third_party/apd_installer/home/trino/cc_casa_codes/cache*/
+/third_party/apd_installer/home/trino/cc_casa_codes/dashboard/
+/third_party/apd_installer/home/trino/cc_casa_codes/pull.csv
+/third_party/apd_installer/home/trino/cc_casa_codes/*.xlsx
+**/__pycache__/
+# APD ad-hoc sample pulls contain customer ids / VPAs / UMNs — keep local only
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/interop/sql/samples/
+/third_party/apd_installer/home/upi_spike_dashboard/automatic_payments/upi_global/sql/adhoc/*.csv

@@ -437,6 +437,29 @@ const csvCell = (v) => {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
+// Decline-code description, kept to 2 lines: FRM rule name (text before " — ") on its own line, the rule
+// text clamped below it. Full text on hover; click toggles the full text in place.
+function CodeDescr({ text }) {
+  const [open, setOpen] = useState(false);
+  const full = String(text).replace(/_/g, " ").replace(/\s+/g, " ").trim();
+  const i = full.indexOf(" — ");
+  const head = i > 0 && i < 70 ? full.slice(0, i).trim() : "";
+  const body = head ? full.slice(i + 3) : full;
+  const long = full.length > (head ? 60 : 90);
+  const clamp = (lines) => (open ? {} : { display: "-webkit-box", WebkitLineClamp: lines, WebkitBoxOrient: "vertical", overflow: "hidden" });
+  return (
+    <div
+      title={open ? undefined : full}
+      onClick={long ? () => setOpen((o) => !o) : undefined}
+      style={{ fontSize: 11, color: C.muted, fontWeight: 400, lineHeight: 1.35, cursor: long ? "pointer" : "default", marginTop: 2 }}
+    >
+      {head && <div style={{ color: C.text2, fontWeight: 600, ...clamp(1) }}>{head}</div>}
+      <div style={clamp(head ? 1 : 2)}>{body}</div>
+      {long && <span style={{ color: C.accent, fontSize: 10 }}>{open ? "less ▴" : "more ▾"}</span>}
+    </div>
+  );
+}
+
 /** extraCol: optional { label, title, render(code), csv(code) } added after "Δ vs L7D avg" (Unified dashboard). */
 // pickKey: turns on the Rows / Columns pickers (saved per key); defaultHiddenCols: column ids off by default.
 export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick, extraCol = null, pickKey = null, defaultHiddenCols = [] }) {
@@ -525,7 +548,7 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
     const focused = focus && r.code === focus;
     return (
       <tr key={isTotal ? "__total__" : r.code} style={{ background: isTotal ? C.card2 : focused ? "rgba(250,178,25,0.08)" : undefined, fontWeight: isTotal ? 700 : 400 }}>
-        <td style={{ ...td, textAlign: "left", position: "sticky", left: 0, background: isTotal ? C.card2 : C.card, maxWidth: 320, whiteSpace: "normal" }}>
+        <td style={{ ...td, textAlign: "left", position: "sticky", left: 0, background: isTotal ? C.card2 : C.card, minWidth: 260, maxWidth: 380, whiteSpace: "normal" }}>
           {isTotal ? (
             <span style={{ color: C.text, fontWeight: 700 }}>{r.code}</span>
           ) : (
@@ -537,7 +560,7 @@ export function DeclinesBody({ result, amountResult, focus, onFocus, onCodeClick
               {r.code}
             </span>
           )}
-          {r.descr && <div style={{ fontSize: 11, color: C.muted, fontWeight: 400, lineHeight: 1.35 }}>{r.descr.replace(/_/g, " ")}</div>}
+          {r.descr && <CodeDescr text={r.descr} />}
         </td>
         {showCol("now") && <td style={{ ...td, color: C.text, fontWeight: 700 }}>{fmtNum(r.now)}</td>}
         {showCol("amount") && <td style={{ ...td, color: C.text2 }}>{fmtInr(r.amount)}</td>}

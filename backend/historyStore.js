@@ -23,7 +23,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export const DASHBOARDS = {
   morning: "Morning Dashboard (retired)",
-  srsnippet: "Success Rate Snippet",
+  srsnippet: "Success Rate Snippet (retired → Unified SR P2M)",
   product: "Product Wise",
   unified: "Unified SR Dashboard",
   skills: "Skills (Utilities)",

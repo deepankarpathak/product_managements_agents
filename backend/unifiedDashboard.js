@@ -32,6 +32,8 @@ import { buildSrAlertHeadline, buildSrAlertSlack, buildSrAllClearSlack } from ".
 import { computeAlerts, pickYday } from "../src/breakdown-math.mjs";
 import { pspGroup } from "../src/unified-psp.mjs";
 import { intradayBankAlerts, splitBankrep } from "./bankReport.js";
+import { withCodeDescr } from "./codeDescr.js";
+import { createStoreGroup, retireLegacy } from "./dayStore.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1005,6 +1007,7 @@ export const FLOW_OPTS = ["ALL", "P2P", "P2M", "LITE"];
 const TPAP = new Set(["ptyes", "ptaxis", "ptsbi", "pthdfc"]);
 const VIEW_SECTIONS = new Set(["breakdown", "codes"]);
 const CODES_TOP = 60;
+const CODES_DAY_TOP = 30;
 const LONG_TAIL = "Other codes (long tail)";
 
 const inHandle = (h, sel) => sel === "all" || (sel === "tpap" ? TPAP.has(h) : h === sel);
@@ -1033,14 +1036,39 @@ function buildView(section, rows, handle, flow) {
   if (section === "breakdown") {
     return trimBreakdown(sumBy(sel, ["ts", "kind", "dim", "code"]).map((r) => ({ ...r, descr: r.descr || "" })));
   }
-  // codes: per (day, code); codes outside the top CODES_TOP by window failures fold into one row.
+  // codes: per (day, code); a code keeps its own rows when it is in the top CODES_TOP by window failures OR in the
+  // top CODES_DAY_TOP of any single day (so a one-day spike — e.g. U18 on 10 Nov 2026, outside the 41-day top 60 —
+  // is not hidden in the long tail on the day it spikes); the rest fold into one row.
   const perCode = new Map();
-  for (const r of sel) perCode.set(r.code, (perCode.get(r.code) || 0) + r.total - r.success);
+  const perDay = new Map();
+  for (const r of sel) {
+    const f = r.total - r.success;
+    perCode.set(r.code, (perCode.get(r.code) || 0) + f);
+    const d = perDay.get(r.ts) || new Map();
+    d.set(r.code, (d.get(r.code) || 0) + f);
+    perDay.set(r.ts, d);
+  }
   const top = new Set([...perCode].sort((a, b) => b[1] - a[1]).slice(0, CODES_TOP).map(([c]) => c));
+  for (const d of perDay.values()) for (const [c] of [...d].sort((a, b) => b[1] - a[1]).slice(0, CODES_DAY_TOP)) top.add(c);
   return sumBy(
     sel.map((r) => (top.has(r.code) ? r : { ...r, code: LONG_TAIL, descr: "" })),
     ["ts", "code"],
   ).map((r) => ({ ...r, descr: r.descr || "", etype: r.etype || "", etype1: r.etype1 || "" }));
+}
+
+// trimBreakdown drops a code's rows for every (day, dim) where it isn't one of the top codes, so
+// "Drivers of <code>" for a minor code (e.g. A07) would list only a handful of banks. The untrimmed
+// per-code rows are kept aside (compact tuples) and served per code: GET /view?section=breakdown&code=.
+const BD_CODE_COLS = ["ts", "handle", "flow", "kind", "dim", "code", "total", "success"];
+export const breakdownCodeRows = (rows) => rows.filter((r) => r.code && r.kind !== "code").map((r) => BD_CODE_COLS.map((c) => r[c]));
+
+function codeView(tuples, code, handle, flow) {
+  const sel = [];
+  for (const t of tuples) {
+    if (t[5] !== code || !inHandle(t[1], handle) || !inFlow(t[2], flow)) continue;
+    sel.push({ ts: t[0], kind: t[3], dim: t[4], code, total: Number(t[6]) || 0, success: Number(t[7]) || 0 });
+  }
+  return sumBy(sel, ["ts", "kind", "dim", "code"]).map((r) => ({ ...r, descr: "" }));
 }
 
 /** Yields between views so a big breakdown (~6s of CPU in total) doesn't stall the server. */
@@ -1295,7 +1323,7 @@ function readJsonFile(file, fallback) {
 
 function writeJsonFile(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`; // unique: two backend processes must not share one temp file
   fs.writeFileSync(tmp, JSON.stringify(value));
   fs.renameSync(tmp, file);
 }
@@ -1385,7 +1413,26 @@ const durationLabel = (key) => {
 /** history: optional store from historyStore.js — every run is also written there. */
 export function registerUnifiedDashboard(app, { dataDir, history: historyStore = null }) {
   const CONFIG_FILE = path.join(dataDir, "udash-config.json");
-  const RESULTS_FILE = path.join(dataDir, "udash-results.json");
+  // On disk: one folder per section under data/udash/<section>/ (meta.json + days/YYYY-MM-DD.json holding that
+  // day's rows of every view, see dayStore.js) and data/udash/_breakdown-codes/ — a run rewrites only its own
+  // section and only the days that changed. The old udash-results.json / udash-breakdown-codes.json are migrated once.
+  const store = createStoreGroup(path.join(dataDir, "udash"));
+  const BD_CODES = "_breakdown-codes";
+  const LEGACY_RESULTS = path.join(dataDir, "udash-results.json");
+  const LEGACY_BD_CODES = path.join(dataDir, "udash-breakdown-codes.json");
+  const persist = (name, payload) => {
+    try {
+      store.save(name, payload);
+    } catch (e) {
+      console.warn(`[udash] could not persist ${name}:`, e.message);
+    }
+  };
+  if (fs.existsSync(LEGACY_BD_CODES)) {
+    if (!store.list().includes(BD_CODES)) persist(BD_CODES, readJsonFile(LEGACY_BD_CODES, null));
+    retireLegacy(LEGACY_BD_CODES);
+  }
+  let bdCodes = null; // { ranAt, rows: tuples } — loaded lazily
+  const loadBdCodes = () => (bdCodes ||= store.load(BD_CODES) || { ranAt: null, rows: [] });
   const SCHED_FILE = path.join(dataDir, "udash-schedule-state.json");
 
   const saved = readJsonFile(CONFIG_FILE, {});
@@ -1396,7 +1443,17 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
     delete saved.version;
   }
   let config = validateConfig(mergeConfig(DEFAULT_CONFIG, saved));
-  const results = readJsonFile(RESULTS_FILE, {}); // section -> last success payload
+  const results = {}; // section -> last success payload
+  for (const sec of store.list()) if (sec !== BD_CODES) results[sec] = store.load(sec);
+  if (fs.existsSync(LEGACY_RESULTS)) {
+    for (const [sec, v] of Object.entries(readJsonFile(LEGACY_RESULTS, {}))) {
+      if (!results[sec] && v) {
+        results[sec] = v;
+        persist(sec, v);
+      }
+    }
+    console.log(`[udash] migrated udash-results.json to ${store.root} (old file kept as ${path.basename(retireLegacy(LEGACY_RESULTS) || "")})`);
+  }
   for (const sec of Object.keys(results)) {
     if (!SECTIONS.includes(sec)) delete results[sec]; // sections merged / removed since
     else if (SECTION_META[sec].daily && results[sec].complete == null) {
@@ -1502,10 +1559,10 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
         ranAt: finishedAt,
         elapsedMs: finishedAt - job.startedAt,
       };
-      try {
-        writeJsonFile(RESULTS_FILE, results);
-      } catch (e) {
-        console.warn("[udash] could not persist results:", e.message);
+      persist(section, results[section]);
+      if (section === "breakdown") {
+        bdCodes = { ranAt: finishedAt, rows: breakdownCodeRows(merged) };
+        persist(BD_CODES, bdCodes);
       }
       Object.assign(job, { status: "success", finishedAt, elapsedMs: finishedAt - job.startedAt, rowCount: merged.length });
       logHistory({ section, trigger: job.trigger, engine: job.engine, duration: job.duration, status: "success", attempt: job.attempt, at: finishedAt, elapsedMs: job.elapsedMs, rows: merged.length });
@@ -1741,9 +1798,11 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
     return arr;
   };
 
+  // NPCI FRM rule / EFRM model text replaces the generic U16 / M16 description on U16-xxxxx and
+  // M16-xxxxx codes (at serve time, so cached results pick up a new rules import without a re-run).
   const handle = (fn) => async (req, res) => {
     try {
-      res.json(await fn(req, res));
+      res.json(withCodeDescr(await fn(req, res)));
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
@@ -1895,6 +1954,13 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
       const key = `${req.query.handle || "all"}|${req.query.flow || "ALL"}`;
       if (!r?.views) return { section, key, ranAt: null, rows: [] };
       if (!r.views[key]) throw new Error(`Unknown view ${key}`);
+      const code = String(req.query.code || "");
+      if (section === "breakdown" && code) {
+        // Untrimmed rows of one code (all dims, all days); empty until a run after this change.
+        const c = loadBdCodes();
+        const ok = c.ranAt === r.ranAt;
+        return { section, key, code, ranAt: r.ranAt, full: ok, rows: ok ? codeView(c.rows, code, req.query.handle || "all", req.query.flow || "ALL") : [] };
+      }
       return { section, key, ranAt: r.ranAt, rows: r.views[key] };
     })
   );
@@ -1930,9 +1996,15 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
         Object.assign(a, { kind, status: st, confidence: conf, ticket: tk, briefId: briefId || null });
       }
       const list = readJsonFile(ANNOT_FILE, []);
-      list.push(a);
+      // One verdict per brief: a re-save replaces the earlier one and keeps it under `prev`.
+      const i = a.briefId ? list.findIndex((n) => n.kind === "investigation" && n.briefId === a.briefId) : -1;
+      if (i >= 0) {
+        const old = list[i];
+        a.prev = [...(old.prev || []), { status: old.status, confidence: old.confidence, ticket: old.ticket, label: old.label, at: old.at }].slice(-5);
+        list[i] = a;
+      } else list.push(a);
       writeJsonFile(ANNOT_FILE, list);
-      return { annotation: a, annotations: list };
+      return { annotation: a, annotations: list, replaced: i >= 0 };
     })
   );
 
@@ -1940,6 +2012,30 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
   // (premium/artifacts/briefs/), the input for `/investigate brief` in Claude Code and for pasting
   // into Claude chat. The page builds the facts from what it already shows; this only writes the file.
   const BRIEF_DIR = path.join(process.env.PREMIUM_DIR || path.join(dataDir, "..", "..", "premium"), "artifacts", "briefs");
+  // An earlier brief for the same bank and windows, so repeat clicks don't pile up copies.
+  // Prefers one already investigated (carries its INV id), else the newest still NEW.
+  const findBrief = (scope, windowNow, windowBase) => {
+    let files = [];
+    try {
+      files = fs.readdirSync(BRIEF_DIR).filter((f) => /^BRIEF-.*\.md$/.test(f));
+    } catch {
+      return null;
+    }
+    const want = [`scope: ${scope}`, `window_now: ${JSON.stringify(windowNow || null)}`, `window_base: ${JSON.stringify(windowBase || null)}`];
+    const hits = [];
+    for (const f of files) {
+      const p = path.join(BRIEF_DIR, f);
+      const md = fs.readFileSync(p, "utf8");
+      const fm = (md.match(/^---\n([\s\S]*?)\n---/) || [])[1] || "";
+      const lines = fm.split("\n");
+      if (!want.every((w) => lines.includes(w))) continue;
+      const get = (k) => (lines.find((l) => l.startsWith(`${k}: `)) || "").slice(k.length + 2).trim() || null;
+      hits.push({ id: get("id") || f.slice(0, -3), path: p, markdown: md, status: get("status"), investigation: get("investigation"), mtime: fs.statSync(p).mtimeMs });
+    }
+    hits.sort((x, y) => (x.status === "INVESTIGATED") - (y.status === "INVESTIGATED") || x.mtime - y.mtime);
+    const h = hits.pop();
+    return h ? { id: h.id, path: h.path, markdown: h.markdown, status: h.status, investigation: h.investigation } : null;
+  };
   app.post(
     "/api/udash/brief",
     handle((req) => {
@@ -1948,6 +2044,10 @@ export function registerUnifiedDashboard(app, { dataDir, history: historyStore =
       if (!/^[A-Za-z0-9]{2,12}$/.test(scope)) throw new Error("scope: a payer bank code");
       const title = String(b.title || "").trim().slice(0, 160);
       if (!title) throw new Error("title required");
+      if (!b.force) {
+        const prior = findBrief(scope.toUpperCase(), b.windowNow, b.windowBase);
+        if (prior) return { ...prior, reused: true };
+      }
       const today = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
       const id = `BRIEF-${scope.toUpperCase()}-${today}-${Date.now().toString(36).slice(-4)}`;
       const sections = (Array.isArray(b.sections) ? b.sections : []).slice(0, 12).map((s) => ({
@@ -2144,8 +2244,10 @@ WHERE dl_last_updated >= DATE '${win.fromDate}' AND created_on >= TIMESTAMP '${w
   app.post(
     "/api/udash/cache/clear",
     handle(() => {
-      for (const k of Object.keys(results)) delete results[k];
-      writeJsonFile(RESULTS_FILE, results);
+      for (const k of Object.keys(results)) {
+        delete results[k];
+        store.clear(k);
+      }
       return { ok: true };
     })
   );
@@ -2154,6 +2256,54 @@ WHERE dl_last_updated >= DATE '${win.fromDate}' AND created_on >= TIMESTAMP '${w
 
   // Used by the History tab's Re-run: same section, same duration, manual trigger.
   return {
+    /** Whole cached payload of a section ({ ranAt, window, rows, views }) — read-only, for SR Snippet's P2M slice. */
+    section(name) {
+      return results[name] || null;
+    },
+    /** Untrimmed breakdown per-code rows ({ ranAt, rows: [ts, handle, flow, kind, dim, code, total, success] }) of the cached breakdown run, or null. */
+    breakdownCodes() {
+      const c = loadBdCodes();
+      return c?.ranAt && c.ranAt === results.breakdown?.ranAt ? c : null;
+    },
+    /** Cached view rows of a section (no query) — used by the Today page instead of an HTTP self-call. */
+    view(section, handle = "all", flow = "ALL") {
+      const r = results[section];
+      return { ranAt: r?.ranAt || null, rows: r?.views?.[`${handle}|${flow}`] || [] };
+    },
+    /** WARN / CRIT rows of the cached breakdown (all handles, all flows, Morning PSP groups) — same rules as the Slack digest, nothing posted. */
+    alerts() {
+      const rows = (results.breakdown?.views?.["all|ALL"] || []).map((r) => (r.kind === "psp" ? { ...r, dim: pspGroup(r.dim, "detailed") } : r));
+      const day = pickYday(rows, { kind: "bank" });
+      if (!day) return { day: null, ranAt: results.breakdown?.ranAt || null, alerts: [] };
+      const bankName = (code) => config.remitterBanks?.find((b) => b.code === code)?.name || null;
+      const alerts = computeAlerts(rows, { kinds: BREAKDOWN_KINDS, yday: day }).map((a) => ({
+        level: a.level,
+        kind: a.kind,
+        dim: a.dim,
+        name: a.kind === "bank" ? bankName(a.dim) : null,
+        srNow: a.srNow,
+        srL7: a.srL7,
+        dsr: a.dsr,
+        impact: a.impact,
+        failures: a.failures,
+        codes: (a.codes || []).slice(0, 2).map((c) => c.code),
+      }));
+      return { day, ranAt: results.breakdown.ranAt, alerts };
+    },
+    /** Per-section freshness for the Today page: last success time and current job status. */
+    health() {
+      // auto = refreshed by the backend schedule (the live payer-bank check only while intradayBankAlert.enabled);
+      // Today flags staleness only for these, so a section that is off by design isn't reported.
+      const rules = config.schedule?.rules || {};
+      return SECTIONS.map((s) => ({
+        section: s,
+        title: SECTION_META[s].title,
+        ranAt: results[s]?.ranAt || null,
+        status: jobs[s]?.status || "idle",
+        error: jobs[s]?.error || null,
+        auto: Boolean(config.schedule?.enabled && rules[s] && rules[s].type !== "off" && (s !== "bankalert" || config.intradayBankAlert?.enabled)),
+      }));
+    },
     rerun({ section, duration }) {
       if (!SECTIONS.includes(section)) throw new Error(`Unknown section ${section}`);
       const d = durationsFor(section)[duration] ? duration : durationFor(section);

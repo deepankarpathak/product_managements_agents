@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { ApdToggle } from "./apd-toggle.jsx";
 import { API_BASE } from "./config.js";
 import {
   AGENT_LOCAL_STORAGE_KEYS,
@@ -21,11 +22,11 @@ const PUBLISH_DEFAULTS_EMPTY = {
   scoreProvider: "openai",
   /**
    * auto | aws | openai | foundry | off — routing for agent generation calls.
-   * auto = Bedrock → Foundry → OpenAI fallback.
+   * auto = Bedrock → Foundry → OpenAI → Anthropic → Claude CLI fallback.
    */
   llmProvider: "auto",
   /** Allow disabling individual providers even when mode is auto. */
-  llmDisabled: { aws: false, foundry: false, openai: false },
+  llmDisabled: { aws: false, foundry: false, openai: false, claudeCli: false },
   /** Optional override for OpenAI chat model when routing uses OpenAI (empty = server default). */
   openaiModel: "",
   /**
@@ -84,6 +85,7 @@ export function getLlmProviderForRequest() {
   if (v === "openai") return "openai";
   if (v === "aws") return "aws";
   if (v === "anthropic") return "anthropic";
+  if (v === "claude-cli") return "claude-cli";
   if (v === "off") return "off";
   return "auto";
 }
@@ -95,6 +97,7 @@ export function getLlmDisabledForRequest() {
     aws: Boolean(x?.aws),
     foundry: Boolean(x?.foundry),
     openai: Boolean(x?.openai),
+    claudeCli: Boolean(x?.claudeCli),
   };
 }
 
@@ -254,6 +257,10 @@ export default function ConnectorsStatus() {
             </div>
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 20, lineHeight: 1.6 }}>
               Connectors are configured via environment variables in your <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4, color: "#93c5fd" }}>.env</code> file. Restart the server after making changes.
+            </div>
+            <div style={{ marginBottom: 20, padding: 12, borderRadius: 10, border: "1px solid #1e293b", background: "#0b1220" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>Dashboards</div>
+              <ApdToggle />
             </div>
 
             {backendUnreachable ? (
@@ -482,7 +489,7 @@ export default function ConnectorsStatus() {
             <div style={{ marginBottom: 16, padding: 14, background: "#1e293b", borderRadius: 12, border: "1px solid #334155" }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>LLM routing (all agents)</div>
               <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 10px", lineHeight: 1.5 }}>
-                <strong style={{ color: "#93c5fd" }}>Auto</strong> tries <strong>AWS Bedrock</strong>, then <strong>Foundry</strong>, then <strong>OpenAI</strong>, then <strong>Anthropic</strong> (skips any provider you disabled). Each agent sends an <code style={{ color: "#94a3b8" }}>agent</code> label for usage. Saved in this browser.
+                <strong style={{ color: "#93c5fd" }}>Auto</strong> tries <strong>AWS Bedrock</strong>, then <strong>Foundry</strong>, then <strong>OpenAI</strong>, then <strong>Anthropic</strong>, then <strong>Claude CLI</strong> (local Claude Code login, text-only) (skips any provider you disabled). Each agent sends an <code style={{ color: "#94a3b8" }}>agent</code> label for usage. Saved in this browser.
               </p>
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <button
@@ -504,7 +511,7 @@ export default function ConnectorsStatus() {
                     fontFamily: "inherit",
                   }}
                 >
-                  Auto (Bedrock → Foundry → OpenAI → Anthropic)
+                  Auto (Bedrock → Foundry → OpenAI → Anthropic → Claude CLI)
                 </button>
                 <button
                   type="button"
@@ -592,6 +599,28 @@ export default function ConnectorsStatus() {
                 </button>
                 <button
                   type="button"
+                  title="Local Claude Code CLI (claude -p) — uses the Claude Code login on the machine running the backend; no API key"
+                  onClick={() => {
+                    const next = { ...loadPublishDefaults(), llmProvider: "claude-cli" };
+                    savePublishDefaults(next);
+                    setPublishDefaults(next);
+                  }}
+                  style={{
+                    padding: "8px 14px",
+                    borderRadius: 8,
+                    border: String(publishDefaults.llmProvider || "auto") === "claude-cli" ? "#f97316 1px solid" : "#334155 1px solid",
+                    background: String(publishDefaults.llmProvider || "auto") === "claude-cli" ? "#f9731622" : "#0f172a",
+                    color: String(publishDefaults.llmProvider || "auto") === "claude-cli" ? "#fdba74" : "#94a3b8",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  Claude CLI only
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     const next = { ...loadPublishDefaults(), llmProvider: "off" };
                     savePublishDefaults(next);
@@ -619,6 +648,8 @@ export default function ConnectorsStatus() {
                   Foundry: {status.llmFoundryConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
                   {" · "}
                   Anthropic: {status.llmAnthropicConfigured ? <span style={{ color: "#22c55e" }}>env OK</span> : <span style={{ color: "#f87171" }}>not linked</span>}
+                  {" · "}
+                  Claude CLI: {status.llmClaudeCliConfigured ? <span style={{ color: "#22c55e" }}>installed</span> : <span style={{ color: "#f87171" }}>not found</span>}
                 </span>
               </div>
               <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -657,6 +688,18 @@ export default function ConnectorsStatus() {
                     }}
                   />
                   Disable Foundry
+                </label>
+                <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 11, color: "#94a3b8" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!publishDefaults.llmDisabled?.claudeCli}
+                    onChange={(e) => {
+                      const next = { ...loadPublishDefaults(), llmDisabled: { ...(loadPublishDefaults().llmDisabled || {}), claudeCli: e.target.checked } };
+                      savePublishDefaults(next);
+                      setPublishDefaults(next);
+                    }}
+                  />
+                  Disable Claude CLI
                 </label>
               </div>
               <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #334155" }}>

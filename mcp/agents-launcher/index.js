@@ -84,6 +84,52 @@ function portOpen(port, host = "127.0.0.1") {
   });
 }
 
+// ── Already-running process detection (11 Nov 2026) ─────────────────────────────────────────────
+// A port check alone is not enough: `node --watch` keeps running after its server crashes ("Completed running
+// 'server.js'. Waiting for file changes…"), so :5000 is closed while a backend watcher still exists. Starting
+// another backend then gives two watchers — both run every scheduler and write the same cache files (this caused
+// the duplicate backend of 11 Nov 2026). So before spawning, look for the process itself.
+const realDir = (d) => {
+  try {
+    return fs.realpathSync(d);
+  } catch {
+    return path.resolve(d);
+  }
+};
+
+/** PIDs (other than this one) whose command line matches `pattern` — and, when `dir` is given, whose cwd is `dir`. */
+function pidsMatching(pattern, dir = null) {
+  if (process.platform === "win32") return [];
+  const r = spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" });
+  const pids = (r.stdout || "")
+    .split("\n")
+    .map(Number)
+    .filter((p) => p && p !== process.pid);
+  if (!dir) return pids;
+  const want = realDir(dir);
+  return pids.filter((pid) => {
+    const c = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { encoding: "utf8" });
+    const line = (c.stdout || "").split("\n").find((l) => l.startsWith("n"));
+    return Boolean(line) && realDir(line.slice(1)) === want;
+  });
+}
+
+const backendPids = (root) => pidsMatching("node .*server\\.js", path.join(root, "backend"));
+const frontendPids = (root) => pidsMatching("react-scripts.*start", root);
+const nextDevPids = (port) => pidsMatching(`next dev.*-p ${port}`);
+
+/** Backend watcher alive but its server down (crashed): touch server.js so `node --watch` restarts it, then wait for :5000. */
+async function nudgeBackend(root) {
+  const file = path.join(root, "backend", "server.js");
+  const now = new Date();
+  fs.utimesSync(file, now, now);
+  for (let i = 0; i < 20; i++) {
+    if (await portOpen(5000)) return true;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return false;
+}
+
 function openUrlInBrowser(url) {
   if (process.platform === "darwin") {
     spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
@@ -129,18 +175,39 @@ async function startMainStack(root) {
       };
     }
   }
-  // Start only the half that is down. Spawning the full `npm run dev` while one port is held
-  // gives a second stack whose frontend exits on :3000 and whose backend fights over :5000.
+  // Start only the half that is down — and only when no process for it exists. Spawning the full `npm run dev`
+  // while one port is held gives a second stack whose frontend exits on :3000 and whose backend fights over :5000;
+  // spawning a backend while a crashed watcher waits for a file change gives two backends.
   if (!forceStart()) {
     const [p3000, p5000] = await Promise.all([portOpen(3000), portOpen(5000)]);
-    if (p3000 && !p5000) {
+    const be = backendPids(root);
+    const fe = frontendPids(root);
+    const notes = [];
+    let nudged = null;
+    if (!p5000 && be.length) {
+      nudged = await nudgeBackend(root);
+      notes.push(
+        nudged
+          ? `Backend watcher already running (pid ${be.join(", ")}) but :5000 was down — restarted it via its file watch; now listening.`
+          : `Backend watcher already running (pid ${be.join(", ")}) but :5000 is still down after a restart nudge — check ${logFile}. Not starting a second backend.`,
+      );
+    }
+    if (!p3000 && fe.length) notes.push(`Frontend process already running (pid ${fe.join(", ")}) but :3000 not answering yet — not starting a second one.`);
+    const needBackend = !p5000 && !be.length;
+    const needFrontend = !p3000 && !fe.length;
+    if (needBackend && needFrontend) {
+      const pid = npmDetached(root, ["run", "dev"], logFile);
+      return { ok: true, started: true, pid, repoRoot: root, logFile };
+    }
+    if (needBackend) {
       const pid = npmDetached(root, ["run", "start:backend"], logFile);
-      return { ok: true, started: "backend", pid, repoRoot: root, logFile, note: "Port 3000 already up; started backend only." };
+      return { ok: true, started: "backend", pid, repoRoot: root, logFile, note: ["Frontend already up; started backend only.", ...notes].join(" ") };
     }
-    if (p5000 && !p3000) {
+    if (needFrontend) {
       const pid = npmDetached(root, ["start"], logFile, { BROWSER: "none" });
-      return { ok: true, started: "frontend", pid, repoRoot: root, logFile, note: "Port 5000 already up; started frontend only." };
+      return { ok: true, started: "frontend", pid, repoRoot: root, logFile, note: ["Backend already up; started frontend only.", ...notes].join(" ") };
     }
+    return { ok: nudged !== false, started: nudged ? "backend-restarted" : false, repoRoot: root, logFile, note: notes.join(" ") || "Already running." };
   }
   const pid = npmDetached(root, ["run", "dev"], logFile);
   return { ok: true, started: true, pid, repoRoot: root, logFile };
@@ -157,13 +224,13 @@ async function startAnalystStack(root) {
   }
   const logDir = ensureLogDir(root);
   const logFile = path.join(logDir, "analyst-dev.log");
-  if (!forceStart() && (await portOpen(3040))) {
+  if (!forceStart() && ((await portOpen(3040)) || nextDevPids(3040).length)) {
     return {
       ok: true,
       started: false,
       repoRoot: root,
       logFile,
-      note: "Port 3040 already listening; skipped npm run dev:analyst. Set PRD_AGENT_FORCE_START=1 to spawn anyway.",
+      note: "Analyst already running (port 3040 listening or its next dev process exists); skipped npm run dev:analyst. Set PRD_AGENT_FORCE_START=1 to spawn anyway.",
     };
   }
   const pid = npmDetached(root, ["run", "dev:analyst"], logFile);
@@ -181,13 +248,13 @@ async function startAlphaStack(root) {
   }
   const logDir = ensureLogDir(root);
   const logFile = path.join(logDir, "alpha-dev.log");
-  if (!forceStart() && (await portOpen(3050))) {
+  if (!forceStart() && ((await portOpen(3050)) || nextDevPids(3050).length)) {
     return {
       ok: true,
       started: false,
       repoRoot: root,
       logFile,
-      note: "Port 3050 already listening; skipped npm run dev:alpha. Set PRD_AGENT_FORCE_START=1 to spawn anyway.",
+      note: "Alpha already running (port 3050 listening or its next dev process exists); skipped npm run dev:alpha. Set PRD_AGENT_FORCE_START=1 to spawn anyway.",
     };
   }
   const pid = npmDetached(root, ["run", "dev:alpha"], logFile);

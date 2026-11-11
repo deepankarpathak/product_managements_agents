@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { mccName } from "./mcc-names.js";
 import { bankHealth, bump, contribution } from "./bank-health.mjs";
 import { DeclinesBody, SR_KINDS, SrKpiStrip } from "./sr-shared.jsx";
@@ -9,6 +9,9 @@ import { PARTIES, scoreAll } from "./escalation.mjs";
 import { BreakdownFilter, DrillCard, EscalationCard } from "./unified-drill.jsx";
 import { NO_PICK, Picker, applyPick, toPick, useStored } from "./table-pickers.jsx";
 import { ScoreTable, aggregate, errorCols, errorRows, lmtdDays, periodLabels, periods, scoreCols, scoreRows } from "./unified-scorecard.jsx";
+// P2M view = the former SR Snippet page, now fed from this dashboard's cache (backend srSnippet.js → snippetFromUnified).
+import RelatedTools from "./related-tools.jsx";
+const SrSnippet = lazy(() => import("./sr-snippet.jsx"));
 
 // Unified SR Dashboard — Morning Dashboard + Success Rate Snippet merged (evaluation build;
 // both old tabs keep running). Talks to backend /api/udash/*. Opening the page only reads
@@ -3936,7 +3939,7 @@ function BankSpikes({ spikes, hidden = 0, spikeAll, setSpikeAll, code, setCode, 
             label: "Spiking code",
             align: "left",
             render: (r) => (
-              <span role="button" tabIndex={0} style={{ cursor: "pointer" }} onClick={() => setCode(r.code)} onKeyDown={(e) => e.key === "Enter" && setCode(r.code)}>
+              <span role="button" tabIndex={0} style={{ cursor: "pointer" }} title={r.descr || undefined} onClick={() => setCode(r.code)} onKeyDown={(e) => e.key === "Enter" && setCode(r.code)}>
                 <b style={{ color: r.code === sel.code ? "#38bdf8" : C.text }}>{r.code}</b>
                 <span style={{ color: C.muted }}>
                   {" "}
@@ -4094,7 +4097,7 @@ function BankDeepDive({ bank, name, onClose, scoped, base, etype, detail, win, l
               <span>
                 <b>{r.k}</b>
                 {r.ctype ? <span style={{ color: C.muted }}> · {r.ctype}</span> : null}
-                {r.descr ? <div style={{ fontSize: 11, color: C.muted }}>{String(r.descr).replace(/_/g, " ").slice(0, 60)}</div> : null}
+                {r.descr ? <div style={{ fontSize: 11, color: C.muted }} title={r.descr}>{String(r.descr).replace(/_/g, " ").slice(0, 60)}</div> : null}
               </span>
             ),
           },
@@ -4202,14 +4205,16 @@ function InvestigateBrief({ bank, name, label, win, head, byFlow, byHandle, type
       { heading: "Error codes, top 10 by rise (% of attempts; a +0.10 pp rise costs 0.10 pp of SR)", lines: codes.slice(0, 10).map(codeLine) },
     ],
   });
-  const create = async () => {
+  const create = async (force = false) => {
+    // A flat or rising SR has no drop to explain: ask before writing a brief for it.
+    if (!force && head?.dsr != null && head.dsr >= 0 && !window.confirm(`${bank} SR is up ${fmtPp(head.dsr)} vs ${label.base}: no drop to investigate. Write a brief anyway?`)) return;
     setOpen(true);
     setBusy(true);
     setErr(null);
     setSaved(false);
     setBrief(null);
     try {
-      const res = await fetch("/api/udash/brief", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(build()) });
+      const res = await fetch("/api/udash/brief", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...build(), force }) });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
       setBrief(d);
@@ -4248,7 +4253,7 @@ function InvestigateBrief({ bank, name, label, win, head, byFlow, byHandle, type
   const prior = notes.filter((n) => n.kind === "investigation");
   return (
     <>
-      <button type="button" style={{ ...btn(), color: "#c084fc" }} onClick={create} title="Write a brief for this bank and investigate it in Claude Code or Claude chat">
+      <button type="button" style={{ ...btn(), color: "#c084fc" }} onClick={() => create()} title="Write a brief for this bank and investigate it in Claude Code or Claude chat">
         🔎 Investigate{prior.length ? ` (${prior.length})` : ""}
       </button>
       {open && (
@@ -4267,9 +4272,28 @@ function InvestigateBrief({ bank, name, label, win, head, byFlow, byHandle, type
             {err && <div style={{ color: C.bad, fontSize: 12, marginBottom: 6 }}>{err}</div>}
             {brief && (
               <>
-                <div style={{ fontSize: 12, color: C.text2, marginBottom: 6 }}>
-                  Brief <b>{brief.id}</b> saved to <code>{brief.path}</code>
-                </div>
+                {brief.reused ? (
+                  <div style={{ fontSize: 12, color: "#c084fc", marginBottom: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>
+                      {brief.status === "INVESTIGATED" ? (
+                        <>
+                          Already investigated: <b>{brief.investigation || brief.id}</b> (brief <code>{brief.id}</code>). The verdict is in the notes above.
+                        </>
+                      ) : (
+                        <>
+                          Existing brief <b>{brief.id}</b> for these windows, not investigated yet: <code>{brief.path}</code>
+                        </>
+                      )}
+                    </span>
+                    <button type="button" style={btn()} onClick={() => create(true)}>
+                      Write new anyway
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: C.text2, marginBottom: 6 }}>
+                    Brief <b>{brief.id}</b> saved to <code>{brief.path}</code>
+                  </div>
+                )}
                 <div style={{ fontSize: 12, marginBottom: 4 }}>
                   <b>Claude Code:</b> in a terminal run <code>cd ~/prd-agent/premium &amp;&amp; claude</code>, then type <code>/investigate brief {brief.id}</code> (or <code>/investigate brief latest</code>).
                 </div>
@@ -4578,7 +4602,18 @@ function Hint({ children }) {
 export default function UnifiedSrDashboard() {
   const [state, setState] = useState(null);
   const [loadErr, setLoadErr] = useState(null);
-  const [page, setPage] = useState("dash");
+  // #srdash?view=p2m (and the old #srsnippet bookmark) opens the P2M view.
+  const pageFromHash = () => (/[?&]view=p2m\b/.test(window.location.hash) ? "p2m" : null);
+  const [page, setPageState] = useState(() => pageFromHash() || "dash");
+  const setPage = useCallback((p) => {
+    setPageState(p);
+    if (window.location.hash.split("?")[0] === "#srdash") window.history.replaceState(null, "", p === "p2m" ? "#srdash?view=p2m" : "#srdash");
+  }, []);
+  useEffect(() => {
+    const onHash = () => window.location.hash.split("?")[0] === "#srdash" && setPageState(pageFromHash() || "dash");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [now, setNow] = useState(Date.now());
   const [durOverrides, setDurOverrides] = useState(() => lsGet("durations", {}));
   // Global filters (day-level cards).
@@ -4643,6 +4678,10 @@ export default function UnifiedSrDashboard() {
   const [declineFocus, setDeclineFocus] = useState(null);
   // A · extra filters: a live day-level slice { rows, sig, label } that replaces A's cached view.
   const [aSlice, setASlice] = useState(null);
+  // A · focused decline code ("Drivers of X") → its untrimmed rows from the backend, which keeps
+  // only each bank / PSP's top codes per day in the view.
+  const [aFocus, setAFocus] = useState(null);
+  const [aFocusRows, setAFocusRows] = useState(null); // { code, key, ranAt, rows }
   // Incident notes + one-click escalation from F into K.
   const [notes, setNotes] = useState([]);
   const loadNotes = useCallback(() => {
@@ -4756,6 +4795,20 @@ export default function UnifiedSrDashboard() {
     };
   }, [handleSel, flowSel, bdRan, cdRan]);
 
+  useEffect(() => {
+    if (!aFocus || !bdRan) return;
+    const key = `${handleSel}|${flowSel}`;
+    const ctl = { dead: false };
+    api(`/view?section=breakdown&handle=${handleSel}&flow=${flowSel}&code=${encodeURIComponent(aFocus)}`)
+      .then((v) => {
+        if (!ctl.dead && v.full) setAFocusRows({ code: aFocus, key, ranAt: v.ranAt, rows: v.rows });
+      })
+      .catch(() => {});
+    return () => {
+      ctl.dead = true;
+    };
+  }, [aFocus, handleSel, flowSel, bdRan]);
+
   const cfg = state?.config;
   const durations = useMemo(() => {
     if (!cfg) return {};
@@ -4798,6 +4851,9 @@ export default function UnifiedSrDashboard() {
           slice: slice.label,
         }
       : viewOf("breakdown");
+    // Swap the trimmed rows of the focused code for its full set (same view only).
+    const fr = !slice && aFocusRows && aFocusRows.code === aFocus && aFocusRows.key === key && aFocusRows.ranAt === res.breakdown?.ranAt ? aFocusRows : null;
+    if (bd && fr) bd.rows = [...bd.rows.filter((r) => r.code !== fr.code), ...fr.rows];
     // Banks hidden in Looker's "Others" (JIOP, NESF, SURY, NSPB…) come from raw txns — not on a live slice.
     const bx = slice ? null : (res.bankx?.rows || []).filter((r) => inHandle(r.handle, handleSel) && inFlow(r.flow, flowSel));
     const breakdown = bd && {
@@ -4853,7 +4909,7 @@ export default function UnifiedSrDashboard() {
       bankU09: res.bank,
       share: res.share,
     };
-  }, [state, views, handleSel, flowSel, pspMode, aSlice]);
+  }, [state, views, handleSel, flowSel, pspMode, aSlice, aFocus, aFocusRows]);
 
   // ── scorecards (G, H, B) — periods anchored on the latest complete day in dims ──
   const P = useMemo(() => {
@@ -5317,6 +5373,7 @@ export default function UnifiedSrDashboard() {
           onChange={setPage}
           options={[
             ["dash", "Dashboard"],
+            ["p2m", "P2M view"],
             ["config", "Configuration"],
           ]}
         />
@@ -5398,10 +5455,15 @@ export default function UnifiedSrDashboard() {
       <LayoutCtx.Provider value={layoutCtx}>
         {page === "dash" && <DockRail docked={docked} summaries={cardSummaries} onUndock={jumpTo} open={railOpen} setOpen={setRailOpen} top={headerH + 12} />}
         <main style={{ padding: `20px ${page === "dash" && docked.length && railOpen ? 248 : 32}px 48px 32px`, maxWidth: 1480, margin: "0 auto", lineHeight: 1.4 }}>
-          {page === "config" ? (
+          {page === "p2m" ? (
+            <Suspense fallback={<div style={{ color: C.muted, fontSize: 13 }}>Loading P2M view…</div>}>
+              <SrSnippet embedded />
+            </Suspense>
+          ) : page === "config" ? (
             <ConfigPage state={state} now={now} durations={durations} onRun={run} onStop={stop} onRetryNow={retryNow} reload={reload} />
           ) : (
             <>
+              <RelatedTools show={["dissection", "hss"]} />
               {solo && (
                 <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12, padding: "8px 12px", border: "1px solid #065f46", borderRadius: 8, background: "rgba(52,211,153,0.08)", fontSize: 12 }}>
                   <b>⤢ Focus: {LAYOUT_CARDS.find(([a]) => a === solo)?.[1]}</b>
@@ -5454,6 +5516,7 @@ export default function UnifiedSrDashboard() {
                           }}
                           focusCode={driverCode}
                           onClearFocus={() => setDriverCode(null)}
+                          onFocusChange={setAFocus}
                           onDimClick={(kind, dim) => {
                             if (kind !== "psp" && kind !== "bank") return;
                             setBScope({ kind, dim });

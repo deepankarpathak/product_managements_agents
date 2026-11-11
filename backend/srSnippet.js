@@ -169,6 +169,73 @@ function trimBreakdown(rows) {
   return out;
 }
 
+// ─── From the Unified SR cache (Phase A: no Snippet query of its own) ────────
+// Every Snippet section is a P2M slice of data Unified SR already pulls from the same Looker table with the
+// same filters (txn_init / success, app_resp_code with '(blank)', handles ptyes / ptaxis / ptsbi / pthdfc):
+//   breakdown  ← Unified breakdown views "<handle>|P2M" (10 days, kinds psp / bank / instrument, + code rows)
+//   psp        ← Unified dims rows kind psp, flow P2M (90 days), payee handle grouped as PAYEE_PSP_CASE
+//   instrument ← Unified dims rows kind instrument, flow P2M
+//   errors     ← Unified codes views "<handle>|P2M" (since the 1st of last month; codes outside its top 60
+//                arrive as "Other codes (long tail)")
+const PAYEE_PSP_GROUP = (h) => {
+  const x = String(h || "").toLowerCase();
+  if (["ybl", "axl", "ibl"].includes(x)) return "PhonePe";
+  if (["okbizaxis", "okbizicici", "okpayaxis"].includes(x)) return "Google Pay";
+  if (["pty", "ptybl", "ptys", "paytm"].includes(x)) return "Paytm";
+  return "Others";
+};
+
+/** unified: the object registerUnifiedDashboard returns. Returns a Snippet cache { [section]: { rows, window, finishedAt, durationMs, source } } or null. */
+export function snippetFromUnified(unified, nowMs = Date.now()) {
+  const bd = unified.section("breakdown");
+  const dims = unified.section("dims");
+  const codes = unified.section("codes");
+  if (!bd?.views || !dims?.rows || !codes?.views) return null;
+  const win = snippetWindow(nowMs);
+  const inWin = (ts) => ts >= win.fromDate && ts < win.toDate;
+  const sum = (rows, keyOf, make) => {
+    const m = new Map();
+    for (const r of rows) {
+      const key = keyOf(r);
+      if (key == null) continue;
+      const o = m.get(key) || make(r);
+      o.total += num(r.total);
+      o.success += num(r.success);
+      m.set(key, o);
+    }
+    return [...m.values()];
+  };
+  // Per-code rows come from Unified's untrimmed per-code store (the views are trimmed per raw payee handle, which
+  // under-counts a code once handles are grouped into PhonePe / Google Pay / Paytm / Others); totals from the views.
+  const bdc = unified.breakdownCodes();
+  if (!bdc) return null;
+  const KINDS = ["psp", "bank", "instrument"];
+  const dimOf = (r) => (r.kind === "psp" ? PAYEE_PSP_GROUP(r.dim) : r.dim);
+  const codeRows = bdc.rows
+    .filter((t) => t[2] === "P2M" && HANDLES.includes(t[1]) && KINDS.includes(t[3]) && inWin(t[0]))
+    .map((t) => ({ ts: t[0], handle: t[1], kind: t[3], dim: t[4], code: t[5], total: t[6], success: t[7] }));
+  const breakdown = [];
+  const errors = [];
+  for (const h of HANDLES) {
+    const v = [...(bd.views[`${h}|P2M`] || []).filter((r) => KINDS.includes(r.kind) && !r.code && inWin(r.ts)), ...codeRows.filter((r) => r.handle === h)];
+    breakdown.push(...sum(v, (r) => `${r.ts}|${r.kind}|${dimOf(r)}|${r.code || ""}`, (r) => ({ ts: r.ts, handle: h, kind: r.kind, dim: dimOf(r), code: r.code || "", total: 0, success: 0 })));
+    errors.push(...sum((codes.views[`${h}|P2M`] || []).filter((r) => inWin(r.ts)), (r) => `${r.ts}|${r.code}`, (r) => ({ ts: r.ts, handle: h, dim: r.code, total: 0, success: 0 })));
+  }
+  const dimsOf = (kind, dimOf) =>
+    sum(
+      dims.rows.filter((r) => r.kind === kind && r.flow === "P2M" && HANDLES.includes(r.handle) && inWin(r.ts)),
+      (r) => `${r.ts}|${r.handle}|${dimOf(r.dim)}`,
+      (r) => ({ ts: r.ts, handle: r.handle, dim: dimOf(r.dim), total: 0, success: 0 }),
+    );
+  const meta = (src) => ({ window: win, finishedAt: src.ranAt || null, durationMs: 0, source: "unified" });
+  return {
+    breakdown: { rows: trimBreakdown(breakdown.filter((r) => !r.code || r.total > r.success)), ...meta(bd) },
+    psp: { rows: dimsOf("psp", PAYEE_PSP_GROUP), ...meta(dims) },
+    errors: { rows: errors.filter((r) => r.total > r.success), ...meta(codes) },
+    instrument: { rows: dimsOf("instrument", (d) => d || "Others"), ...meta(dims) },
+  };
+}
+
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 function readJsonFile(file, fallback) {
@@ -181,7 +248,7 @@ function readJsonFile(file, fallback) {
 
 function writeJsonFile(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`; // unique: two backend processes must not share one temp file
   fs.writeFileSync(tmp, JSON.stringify(value));
   fs.renameSync(tmp, file);
 }
@@ -189,7 +256,39 @@ function writeJsonFile(file, value) {
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 /** history: optional store from historyStore.js — every section run is also written there. */
-export function registerSrSnippet(app, { dataDir, history = null }) {
+// unified: () => the object registerUnifiedDashboard returns. Phase A (11 Nov 2026): by default the Snippet runs
+// no query of its own — /state is built from the Unified SR cache (snippetFromUnified; parity checked against the
+// old Snippet query: psp / instrument / breakdown identical, top-15 error tables identical) and Refresh re-runs
+// the Unified sections it reads. SRSNIPPET_OWN_QUERY=true brings back the old Trino query + 09:00 / 12:00 schedule.
+// The old srsnippet-cache.json is left on disk untouched.
+const UNIFIED_SOURCES = { breakdown: "breakdown", psp: "dims", instrument: "dims", errors: "codes" };
+export function registerSrSnippet(app, { dataDir, history = null, unified = null }) {
+  const ownQuery = String(process.env.SRSNIPPET_OWN_QUERY || "").toLowerCase() === "true" || !unified;
+  let built = null; // { key, cache } — rebuilt only when a Unified section it reads has a new run
+  const fromUnified = () => {
+    const u = unified();
+    const key = ["breakdown", "dims", "codes"].map((s) => u.section(s)?.ranAt || 0).join("|") + `|${u.breakdownCodes()?.ranAt || 0}|${snippetWindow().toDate}`;
+    if (built?.key !== key) built = { key, cache: snippetFromUnified(u) };
+    const health = Object.fromEntries((u.health() || []).map((h) => [h.section, h]));
+    const jobsU = Object.fromEntries(
+      SNIPPET_SECTIONS.map((s) => {
+        const h = health[UNIFIED_SOURCES[s]] || {};
+        const st = h.status === "running" || h.status === "queued" ? "running" : h.status === "failed" ? "error" : built.cache?.[s] ? "done" : "idle";
+        return [s, { status: st, ...(h.error ? { error: h.error } : {}), ...(h.ranAt ? { finishedAt: h.ranAt } : {}) }];
+      }),
+    );
+    return { cache: built.cache || {}, jobs: jobsU };
+  };
+  const rerunUnified = () => {
+    const u = unified();
+    return [...new Set(Object.values(UNIFIED_SOURCES))].map((section) => {
+      try {
+        return u.rerun({ section }).started;
+      } catch (e) {
+        return `${section}: ${e.message}`;
+      }
+    });
+  };
   const cacheFile = path.join(dataDir, "srsnippet-cache.json");
   // cache: { [section]: { rows, window, finishedAt, durationMs } }
   const cache = readJsonFile(cacheFile, {});
@@ -252,6 +351,7 @@ export function registerSrSnippet(app, { dataDir, history = null }) {
 
   // Scheduler: fire at each SCHEDULE_AT slot (IST) once per day.
   setInterval(() => {
+    if (!ownQuery) return; // data comes from Unified SR, which has its own schedule
     const wall = new Date(Date.now() + TZ_OFFSET_MIN * 60000);
     const hm = `${pad2(wall.getUTCHours())}:${pad2(wall.getUTCMinutes())}`;
     const due = SCHEDULE_AT.filter((t) => t <= hm).pop();
@@ -275,20 +375,19 @@ export function registerSrSnippet(app, { dataDir, history = null }) {
 
   app.get(
     "/api/srsnippet/state",
-    handle(() => ({
-      handles: HANDLES,
-      sections: SNIPPET_SECTIONS,
-      schedule: SCHEDULE_AT,
-      running: Boolean(running),
-      jobs,
-      cache,
-      window: snippetWindow(),
-    })),
+    handle(() => {
+      if (!ownQuery) {
+        const u = fromUnified();
+        return { handles: HANDLES, sections: SNIPPET_SECTIONS, schedule: ["Unified SR schedule"], source: "unified", running: Object.values(u.jobs).some((j) => j.status === "running"), jobs: u.jobs, cache: u.cache, window: snippetWindow() };
+      }
+      return { handles: HANDLES, sections: SNIPPET_SECTIONS, schedule: SCHEDULE_AT, source: "own", running: Boolean(running), jobs, cache, window: snippetWindow() };
+    }),
   );
 
   app.post(
     "/api/srsnippet/run",
     handle(() => {
+      if (!ownQuery) return { started: true, unified: rerunUnified() };
       void runAll("manual");
       return { started: true };
     }),
@@ -306,6 +405,7 @@ export function registerSrSnippet(app, { dataDir, history = null }) {
   // Used by the History tab's Re-run (the snippet always refreshes all sections).
   return {
     rerun() {
+      if (!ownQuery) return { started: `Unified SR sections behind SR Snippet: ${rerunUnified().join("; ")}` };
       if (running) return { started: "Already running — results will update shortly" };
       void runAll("manual");
       return { started: "Success Rate Snippet (all sections)" };

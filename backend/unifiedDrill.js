@@ -23,6 +23,7 @@ import fs from "fs";
 import path from "path";
 import { runTrino } from "./trinoClient.js";
 import { BD_DIMS, PSP_KEY, trimBreakdown } from "./unifiedDashboard.js";
+import { withCodeDescr } from "./codeDescr.js";
 
 const HANDLES = ["ptyes", "ptaxis", "ptsbi", "pthdfc"];
 const TZ_MIN = 330;
@@ -329,7 +330,7 @@ export function registerUnifiedDrill(app, { dataDir }) {
 
   const handle = (fn) => async (req, res) => {
     try {
-      res.json(await fn(req));
+      res.json(withCodeDescr(await fn(req)));
     } catch (err) {
       res.status(400).json({ error: err.message });
     }

@@ -303,7 +303,7 @@ const btn = (primary) => ({
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
-export default function SrSnippet() {
+export default function SrSnippet({ embedded = false }) {
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [handleSel, setHandleSel] = useState("all");
@@ -425,13 +425,13 @@ export default function SrSnippet() {
   const handleLabel = handleSel === "all" ? "PTYES + PTAXIS + PTSBI + PTHDFC" : handleSel.toUpperCase();
 
   return (
-    <div style={{ minHeight: "calc(100vh - 40px)", background: C.bg, color: C.text, fontFamily: "'Segoe UI', sans-serif", padding: "16px 20px" }}>
+    <div style={embedded ? { color: C.text } : { minHeight: "calc(100vh - 40px)", background: C.bg, color: C.text, fontFamily: "'Segoe UI', sans-serif", padding: "16px 20px" }}>
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 14 }}>
         <div style={{ flex: 1, minWidth: 260 }}>
-          <div style={{ fontSize: 20, fontWeight: 700 }}>Success Rate Snippet</div>
+          <div style={{ fontSize: 20, fontWeight: 700 }}>{embedded ? "P2M view" : "Success Rate Snippet"}</div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
             P2M · payer {handleLabel} · Yesterday = {per.y || "—"} · MTD {per.mtd || "—"} vs LMTD {per.lmtd || "—"} · source
-            team_product.LOOKER_TPAP_Txns_V3 (Trino)
+            team_product.LOOKER_TPAP_Txns_V3{state?.source === "unified" ? " (from the Unified SR cache — no separate query)" : " (Trino)"}
           </div>
         </div>
         <a
@@ -471,7 +471,9 @@ export default function SrSnippet() {
       )}
       {state && (
         <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
-          Opening this tab only reads cached results. Backend auto-refreshes daily at {state.schedule?.join(" & ")} IST.
+          {state.source === "unified"
+            ? "Built from the Unified SR cache (breakdown 10 days, day-level dims, decline codes MTD / LMTD) — it refreshes whenever those Unified SR sections run. Refresh here re-runs those sections."
+            : `Opening this tab only reads cached results. Backend auto-refreshes daily at ${state.schedule?.join(" & ")} IST.`}
         </div>
       )}
 

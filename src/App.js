@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
+import { useApdConfig } from "./apd-toggle.jsx";
 import ConnectorsStatus from "./ConnectorsStatus.jsx";
 import BackendWarningBanner from "./BackendWarningBanner.jsx";
 
@@ -9,17 +10,19 @@ const BRDAgent = lazy(() => import("./brd-agent.jsx"));
 const JiraAgent = lazy(() => import("./jira-agent.jsx"));
 const AnalystAgentTab = lazy(() => import("./analyst-agent.jsx"));
 const AlphaAgent = lazy(() => import("./alpha-agent.jsx"));
-const SrSnippet = lazy(() => import("./sr-snippet.jsx"));
 const UnifiedSrDashboard = lazy(() => import("./sr-unified-dashboard.jsx"));
 const ProductDashboard = lazy(() => import("./product-dashboard.jsx"));
+const AutoPayments = lazy(() => import("./autopay.jsx"));
 const Utilities = lazy(() => import("./utilities.jsx"));
 const DashboardHistory = lazy(() => import("./dashboard-history.jsx"));
 const PmHome = lazy(() => import("./pm-home.jsx"));
 const HssTraffic = lazy(() => import("./hss-traffic.jsx"));
 const SrDissection = lazy(() => import("./sr-dissection.jsx"));
 const SrBenchmark = lazy(() => import("./sr-benchmark.jsx"));
+const AcquiringSr = lazy(() => import("./sr-acquiring.jsx"));
 const Lumina = lazy(() => import("./lumina.jsx"));
 const TxnTracer = lazy(() => import("./txn-tracer.jsx"));
+const KibanaLogs = lazy(() => import("./kibana-logs.jsx"));
 
 const APP_TITLE = "PM Console";
 
@@ -33,10 +36,11 @@ const HEAVY_KEEP = 2;
 const PAGES = [
   { group: "", id: "today", hash: "#today", icon: "⌂", label: "Today", accent: "#f59e0b", render: (active, ctx) => <PmHome active={active} onNavigate={ctx.navigate} /> },
   { group: "Monitor", id: "srdash", hash: "#srdash", icon: "◎", label: "Unified SR", accent: "#60a5fa", heavy: true, render: () => <UnifiedSrDashboard /> },
+  { group: "Monitor", id: "acqsr", hash: "#acqsr", icon: "⇲", label: "Acquiring SR", accent: "#2dd4bf", render: (active) => <AcquiringSr active={active} /> },
   { group: "Monitor", id: "srdissect", hash: "#srdissect", icon: "⧉", label: "SR Dissection", accent: "#f87171", heavy: true, render: () => <SrDissection /> },
   { group: "Monitor", id: "srbench", hash: "#srbench", icon: "⚖", label: "SR vs Peers", accent: "#facc15", render: () => <SrBenchmark /> },
-  { group: "Monitor", id: "srsnippet", hash: "#srsnippet", icon: "%", label: "SR Snippet", accent: "#34d399", heavy: true, render: () => <SrSnippet /> },
   { group: "Monitor", id: "product", hash: "#product", icon: "▦", label: "Product Wise", accent: "#fb923c", heavy: true, render: () => <ProductDashboard /> },
+  { group: "Monitor", id: "autopay", hash: "#autopay", icon: "↻", label: "Automatic Payments", accent: "#a3e635", heavy: true, render: (active) => <AutoPayments active={active} /> },
   { group: "Monitor", id: "hss", hash: "#hss", icon: "⇆", label: "HSS Traffic", accent: "#38bdf8", render: () => <HssTraffic /> },
   { group: "Monitor", id: "history", hash: "#history", icon: "🕘", label: "History", accent: "#f472b6", heavy: true, render: (active) => <DashboardHistory active={active} /> },
   { group: "Create", id: "prd", hash: "#prd", icon: "📄", label: "PRD Agent", accent: "#f59e0b", render: () => <PRDAgent /> },
@@ -47,6 +51,7 @@ const PAGES = [
   { group: "Ask", id: "analyst", hash: "#analyst", icon: "⌕", label: "Analyst Agent", accent: "#22d3ee", heavy: true, render: () => <AnalystAgentTab /> },
   { group: "Ask", id: "alpha", hash: "#alpha", icon: "α", label: "Alpha Agent", accent: "#10b981", heavy: true, render: () => <AlphaAgent /> },
   { group: "Tools", id: "txntrace", hash: "#txntrace", icon: "⌖", label: "Txn Tracer", accent: "#f472b6", render: (active, ctx) => <TxnTracer request={ctx.request} /> },
+  { group: "Tools", id: "kibana", hash: "#kibana", icon: "🔎", label: "Kibana Logs", accent: "#fbbf24", render: (active, ctx) => <KibanaLogs request={ctx.request} /> },
   { group: "Tools", id: "utilities", hash: "#utilities", icon: "🛠", label: "Utilities", accent: "#a78bfa", render: () => <Utilities /> },
 ];
 const GROUPS = ["", "Monitor", "Create", "Ask", "Tools"];
@@ -55,9 +60,18 @@ const PAGE_BY_ID = Object.fromEntries(PAGES.map((p) => [p.id, p]));
 // Bookmarkable: every page has a hash (e.g. http://localhost:3000/#product).
 // #history?dashboard=unified|srsnippet opens History pre-filtered.
 // #morning (retired Morning Dashboard) now opens the Unified SR Dashboard.
+// #srsnippet (SR Snippet, merged into Unified SR as its P2M view on 11 Nov 2026) → #srdash?view=p2m.
+const LEGACY_HASH = { "#srsnippet": "#srdash?view=p2m" };
+const redirectLegacyHash = () => {
+  const to = LEGACY_HASH[window.location.hash.split("?")[0]];
+  if (to) window.history.replaceState(null, "", to);
+};
 const HASH_TABS = { "#morning": "srdash", ...Object.fromEntries(PAGES.map((p) => [p.hash, p.id])) };
 const DEFAULT_TAB = "today";
-const tabFromHash = () => HASH_TABS[window.location.hash.split("?")[0]] || null;
+const tabFromHash = () => {
+  redirectLegacyHash();
+  return HASH_TABS[window.location.hash.split("?")[0]] || null;
+};
 
 const SIDEBAR_KEY = "pm-console-sidebar-collapsed";
 const readCollapsed = () => {
@@ -70,6 +84,9 @@ const readCollapsed = () => {
 
 function App() {
   const [activeTab, setActiveTab] = useState(() => tabFromHash() || DEFAULT_TAB);
+  // Automatic Payments turned off (or its folder missing): no sidebar entry, unless you are on that page.
+  const apdCfg = useApdConfig();
+  const hidePage = (p) => p.id === "autopay" && apdCfg && !apdCfg.active && activeTab !== "autopay";
   const [collapsed, setCollapsed] = useState(readCollapsed);
   // Most recently used first. Pages mount on first visit; heavy ones are evicted past HEAVY_KEEP.
   const [recent, setRecent] = useState(() => [activeTab]);
@@ -179,7 +196,7 @@ function App() {
               ) : (
                 <div style={{ color: "#475569", fontSize: 11, fontWeight: 600, letterSpacing: 0.4, padding: "12px 10px 4px", textTransform: "uppercase" }}>{g}</div>
               )}
-              {PAGES.filter((p) => p.group === g).map((p) => {
+              {PAGES.filter((p) => p.group === g && !hidePage(p)).map((p) => {
                 const on = p.id === activeTab;
                 return (
                   <button
