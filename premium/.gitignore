@@ -1,0 +1,22 @@
+# Local-only: PM session journals. Your working thinking stays on your machine.
+# Knowledge, JIRA tickets, artifacts, and decisions DO get pushed — that's the shared output.
+sessions/*.md
+
+# Machine-specific Claude Code settings
+.claude/settings.local.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python artifacts (if custom-scripts/ contains Python)
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,200 @@
+{
+ "_window": "Notes written 26 Oct 2026 from 15 Sep – 14 Oct data; the numbers on the page recompute for any range, the notes do not.",
+ "INT-5033": {
+  "title": "Location access not given (Android)",
+  "npci": "None. Not in the core translator (upi_config.response_code_translator); Paytm stops the payment before it is sent to NPCI, so there is no RIS code.",
+  "why": "Paytm requires device location for every UPI International payment. App message: 'To complete this payment securely, please enable location access … Settings > Location > App Permissions'. INT-5033 is the Android variant (100% of its failures are Android).",
+  "evidence": [
+   "1,142 failures, ₹45.5 L failed GMV: the largest failure code (17% of all failures).",
+   "When the app sent no location (lat/long missing or 0,0) 57% of those payments failed with INT-5033; 42% of INT-5033 failures had no location at all.",
+   "The other 58% did send a location (in India) and were still blocked: likely the permission is 'approximate' / 'while using' only, or the location was stale. Check with the app team which check fires.",
+   "Spread across all payer banks and both handles (ptyes 81%, ptaxis 19%, same as volume), so it is not bank-driven. Older app builds fail more (10.83.12: 7.1% vs 3.9% on 10.85.5)."
+  ],
+  "owner": "Paytm app (payer PSP)"
+ },
+ "INT-5032": {
+  "title": "Location access not given (iOS)",
+  "npci": "None. Not in the core translator; blocked inside Paytm before NPCI.",
+  "why": "iOS variant of INT-5033. App message: 'enable location access … Settings > Privacy & Security > Location Services'.",
+  "evidence": [
+   "844 failures, ₹36.2 L failed GMV (13% of failures); 100% iOS.",
+   "No location sent: 24.5% of those payments failed with INT-5032. 73% of INT-5032 failures did send an India location, so the permission level (precise vs approximate) is the more likely trigger on iOS.",
+   "No payer-bank or handle concentration; app 10.85.5 fails least (0.8%) vs 6–8% on 10.83.10, 10.84.9, 10.85.6 and 10.86.0, so it is worth checking what changed between those builds."
+  ],
+  "owner": "Paytm app (payer PSP)"
+ },
+ "INT-20123": {
+  "title": "Cooling period: new device / new bank link",
+  "npci": "No NPCI code. The core translator maps it only to risk code RISK123 (Paytm risk), nothing is sent to NPCI.",
+  "why": "UPI cooling-period rule: for 72 hours after a new device binding or bank-account link, payments are capped at ₹5,000 per 24 hours.",
+  "evidence": [
+   "All 31 failures were within 72 h of device binding (hours since oauthDeviceBindingTime).",
+   "Mostly above ₹5,000 (12 of 31 in ₹5k–10k, 9 above ₹10k), consistent with the ₹5,000 cap; the few smaller ones are users who had already spent part of the ₹5,000.",
+   "HDFC payers are 55% of these failures; small numbers, so this may just be chance."
+  ],
+  "owner": "Paytm risk (UPI guideline)"
+ },
+ "INT-1928": {
+  "title": "Cooling period (bank account / login)",
+  "npci": "No NPCI code (translator row has no NPCI / CBS / risk code).",
+  "why": "App message: the money transfer failed because the bank account was linked or the user logged in recently; same family as INT-20123 / INT-9661.",
+  "evidence": [
+   "Use the 'hours since device binding' and amount panels for this code to see the cooling-period pattern."
+  ],
+  "owner": "Paytm risk (UPI guideline)"
+ },
+ "INT-5176": {
+  "title": "Declined by receiver's bank",
+  "npci": "No NPCI code on the txn; the core translator maps it to CBS code RECON_120 only.",
+  "why": "App message: 'Your payment was declined by receiver's bank.' Check the payee handle / beneficiary bank split.",
+  "evidence": [],
+  "owner": "Beneficiary side"
+ },
+ "PM14": {
+  "title": "UPI International request timeout",
+  "npci": "PM14 is itself an NPCI code (v2.9: 'Request timeout scenario for UPI International', BD).",
+  "why": "The international leg (NIPL / partner network) did not answer in time.",
+  "evidence": [
+   "782 failures, 667 of them on 5–7 Oct (270, 254, 143) plus 90 on 9 Oct: this is the main cause of the 4–7 Oct SR dip.",
+   "Hit every partner in proportion (fonepay Nepal, RMA Bhutan, LankaPay, SBI Global) and every payer bank at ~2%, so it was a network-level outage, not one partner or one bank."
+  ],
+  "owner": "NPCI International / partner network"
+ },
+ "RESP_VAL_QR_NOT_FOUND": {
+  "title": "QR not found at the partner",
+  "npci": "NPCI response RESP_VAL_QR_NOT_FOUND; Paytm app code U08 (System exception).",
+  "why": "The partner network could not find the scanned merchant QR (expired / deregistered / wrong QR).",
+  "evidence": [
+   "303 failures, spread across Nepal, Bhutan, Sri Lanka and Singapore partners in proportion to volume."
+  ],
+  "owner": "Partner network / merchant QR"
+ },
+ "U16-01176": {
+  "title": "Nepal per-payment limit (₹35,000)",
+  "npci": "NPCI code U16 (risk threshold exceeded) with NPCI subcode 01176; not in the core translator, so the subcode is the RIS reason.",
+  "why": "App message: 'For merchant payments in Nepal, you can send up to Rs 35,000 at a time and Rs 1 lakh in 24 hours.' This is the NPCI / UPI International cap for Nepal merchant payments.",
+  "evidence": [
+   "178 failures in the full pull, ₹72.5 L failed GMV in 15 Sep – 14 Oct: every one is ₹28,750 or more (NPR 46,000+), all to Nepal (fonepay).",
+   "Failures below ₹35,000 are users who had already used part of the ₹1 lakh / 24 h limit.",
+   "Spread across SBIN, HDFC, ICIC, PUNB in proportion to volume, so it is an NPCI rule, not a bank's."
+  ],
+  "owner": "NPCI risk",
+  "rule": {
+   "id": "1176",
+   "name": "GLOBAL_UPI_LIMITS_NP_P2M_24HRS_NIPL",
+   "text": "Nepal merchant payments over ₹35K per txn or ₹1L per 24h",
+   "src": "rule name from the user's reference table (26 Oct); not in response_mapper"
+  }
+ },
+ "U31-XW": {
+  "title": "Compliance violation (beneficiary)",
+  "npci": "U31 (credit leg) with XW: 'Transaction cannot be completed. Compliance violation (beneficiary)'.",
+  "why": "The beneficiary side (fonepay Nepal) rejects the credit on compliance grounds.",
+  "evidence": [
+   "656 failures, 100% Nepal / fonepayaxis; the rate rises with ticket size (largest code in the ₹2k–10k bands)."
+  ],
+  "owner": "Beneficiary (fonepay Nepal)"
+ },
+ "U30-Z9": {
+  "title": "Insufficient funds",
+  "npci": "U30 (debit leg) with Z9: insufficient funds in the remitter account.",
+  "why": "The payer does not have enough balance (customer side).",
+  "evidence": [
+   "685 failures across all payer banks; BARB (3.1%) and IOBA (3.5%) are above the ~1.7% average."
+  ],
+  "owner": "Payer (customer)"
+ },
+ "U16-01188": {
+  "title": "Bhutan per-payment limit (₹25,000)",
+  "npci": "U16 with NPCI subcode 01188.",
+  "why": "App message: 'For merchant payments in Bhutan, you can send up to Rs 25,000 at a time and Rs 1 lakh in 24 hours.'",
+  "evidence": [
+   "All Bhutan (RMA). Median failed ticket ≈ ₹39,500, i.e. above the ₹25,000 cap."
+  ],
+  "owner": "NPCI risk (country limit)",
+  "rule": {
+   "id": "1188",
+   "name": "GLOBAL_UPI_LIMITS_BT_P2M_24HRS_NIPL",
+   "text": "Bhutan merchant payments over ₹25K per txn or ₹1L per 24h",
+   "src": "rule name from the user's reference table (26 Oct); not in response_mapper"
+  }
+ },
+ "U16-00980": {
+  "title": "₹1 lakh per 24 hours",
+  "npci": "U16-00980 (the core translator maps it to itself).",
+  "why": "App message: 'You can send up to Rs 1 lakh in 24 hours.' The daily UPI limit across payments.",
+  "evidence": [],
+  "owner": "NPCI risk (daily limit)",
+  "rule": {
+   "id": "980",
+   "name": "CUMAMT_GR_1LAC_24HR_APPROVED_N",
+   "text": "payer sent more than ₹1L in 24h",
+   "src": "rule name from the user's reference table (26 Oct); not in response_mapper"
+  }
+ },
+ "U16-01180": {
+  "title": "Nepal: 50 payments in 7 days",
+  "npci": "U16 with NPCI subcode 01180.",
+  "why": "Count limit: 'You can make up to 50 merchant payments in Nepal in 7 days.' Small tickets, so not an amount issue.",
+  "evidence": [],
+  "owner": "NPCI risk (velocity)"
+ },
+ "U16-01179": {
+  "title": "Nepal: 10 payments in 24 hours",
+  "npci": "U16 with NPCI subcode 01179.",
+  "why": "Count limit: 'You can make up to 10 merchant payments in Nepal in 24 hours.'",
+  "evidence": [],
+  "owner": "NPCI risk (velocity)"
+ },
+ "U16-01191": {
+  "title": "Bhutan: 10 payments in 24 hours",
+  "npci": "U16 with NPCI subcode 01191.",
+  "why": "Count limit: 'You can make up to 10 merchant payments in Bhutan in 24 hours.'",
+  "evidence": [],
+  "owner": "NPCI risk (velocity)"
+ },
+ "U16-01423": {
+  "title": "Nepal high-value block (no app message)",
+  "npci": "U16 with NPCI subcode 01423; not in the core translator and no app message in response_mapper.",
+  "why": "Not documented. All 50 failures are Nepal and ₹50,250 or more (median ₹64,000), so it behaves like a high-value / cumulative Nepal limit (likely the NPR 1,00,000 ≈ ₹62,500 or ₹1 lakh / 24 h rule).",
+  "evidence": [
+   "No Nepal payment of NPR 1,00,000 or more succeeds in the window."
+  ],
+  "owner": "NPCI risk (country limit)"
+ },
+ "INT-9661": {
+  "title": "Cooling period: new device / new bank link",
+  "npci": "No NPCI code (Paytm internal).",
+  "why": "Same rule as INT-20123: ₹5,000 every 24 hours for 72 hours after a new device or bank link.",
+  "evidence": [],
+  "owner": "Paytm risk (UPI guideline)"
+ },
+ "_limits": {
+  "source": "App messages of the U16 subcodes in TPAP response_mapper (26 Oct 2026)",
+  "NP": {
+   "txn": 35000,
+   "day": 100000,
+   "label": "Nepal ₹35k per payment · ₹1L / 24h (U16-01176)"
+  },
+  "BT": {
+   "txn": 25000,
+   "day": 100000,
+   "label": "Bhutan ₹25k per payment · ₹1L / 24h (U16-01188)"
+  },
+  "LK": {
+   "txn": 50000,
+   "day": 100000,
+   "label": "Sri Lanka ₹50k per payment · ₹1L / 24h (U16-01182)"
+  },
+  "AE": {
+   "txn": 100000,
+   "day": 100000,
+   "label": "UAE / Qatar ₹1L per payment · ₹1L / 24h (U16-01147)"
+  },
+  "QA": {
+   "txn": 100000,
+   "day": 100000,
+   "label": "UAE / Qatar ₹1L per payment · ₹1L / 24h (U16-01147)"
+  }
+ }
+}
