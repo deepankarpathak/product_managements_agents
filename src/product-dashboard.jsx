@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { periods, periodLabels, aggregate, errorRows, errorCols, ScoreTable } from "./unified-scorecard.jsx";
 import { mccName } from "./mcc-names.js";
+import { Zoomable } from "./trend-zoom.jsx";
 
 // Product Wise dashboard — per-product health for Paytm TPAP handles
 // (PTYES, PTAXIS, PTSBI, PTHDFC). UPI International, UPI Plugin (@yesnext, see
@@ -438,7 +439,32 @@ function TrendChart({ days, lines, bars, curFrom = 0, yFmt = (v) => fmtPct(v), b
   );
 }
 
-function Spark({ values, color, curFrom = 0 }) {
+/** Display name of a table row, for the zoom title. */
+const rowName = (r) => r.label ?? r.bank ?? r.type ?? r.code ?? r.cat ?? r.key ?? r.k ?? r.id ?? "";
+
+/** Small daily line; with days (same length as values) it opens the zoomed daily view on click. */
+function Spark({ values, color, curFrom = 0, days, name, metric = "Value", unit = "pct", upIsBad = false }) {
+  const spark = <SparkLine values={values} color={color} curFrom={curFrom} />;
+  if (!days || days.length !== values.length || values.filter((v) => v != null).length < 2) return spark;
+  return (
+    <Zoomable
+      spec={() => ({
+        title: `${metric} · ${name || "—"}`,
+        subtitle: `Product Wise${(window.location.hash.match(/tab=([^&]+)/) || [])[1] ? ` · ${decodeURIComponent(window.location.hash.match(/tab=([^&]+)/)[1])}` : ""}`,
+        days,
+        lines: [{ name: metric, color: color && color !== "#94a3b8" ? color : "#60a5fa", values }],
+        fmt: unit === "pct" ? (v) => fmtPct(v, 2) : fmtNum,
+        unit: unit === "pct" ? "pct" : "count",
+        upIsBad,
+        curFrom,
+      })}
+    >
+      {spark}
+    </Zoomable>
+  );
+}
+
+function SparkLine({ values, color, curFrom = 0 }) {
   const W = 92;
   const H = 22;
   const vs = values.map((v) => v ?? null);
@@ -1129,7 +1155,7 @@ function LiteView({ cache, jobs, onShowSql, onRun, onStop }) {
     { key: "ys", label: "Yesterday %", title: fmtDay(eY), render: (r) => <b>{fmtPct(r.ys, 2)}</b>, text: (r) => fmtPct(r.ys, 2) },
     { key: "d2s", label: "D-2 %", title: fmtDay(eD2), render: (r) => fmtPct(r.d2s, 2) },
     { key: "dpp", label: "vs range", title: "Yesterday % − range %, percentage points", render: (r) => <span style={{ color: r.dpp > 0.05 ? C.bad : r.dpp < -0.05 ? C.good : C.text2 }}>{fmtSigned(r.dpp, " pp", 2)}</span>, text: (r) => fmtSigned(r.dpp, " pp", 2) },
-    { key: "daily", label: "Trend", title: `Daily % of txns, ${eSpan}`, render: (r) => <Spark values={r.daily} color={r.dpp > 0.05 ? C.bad : r.dpp < -0.05 ? C.good : "#94a3b8"} />, text: () => "" },
+    { key: "daily", label: "Trend", title: `Daily % of txns, ${eSpan}`, render: (r) => <Spark values={r.daily} days={eDays} name={rowName(r)} metric="% of txns" unit="pct" upIsBad color={r.dpp > 0.05 ? C.bad : r.dpp < -0.05 ? C.good : "#94a3b8"} />, text: () => "" },
   ];
   const errDailyCols = [
     { key: "d", label: "Date", render: (r) => r.d },
@@ -1518,7 +1544,7 @@ function LiteView({ cache, jobs, onShowSql, onRun, onStop }) {
           { key: "ysr", label: "Yesterday SR", title: fmtDay(mY), render: (r) => fmtPct(r.ysr, 2) },
           { key: "d2sr", label: "D-2 SR", title: fmtDay(mD2), render: (r) => fmtPct(r.d2sr, 2) },
           { key: "dpp", label: "vs range", title: "Yesterday SR − range SR, percentage points", render: (r) => <span style={{ color: r.dpp == null || Math.abs(r.dpp) < 0.05 ? C.text2 : r.dpp > 0 ? C.good : C.bad }}>{fmtSigned(r.dpp, " pp")}</span>, text: (r) => fmtSigned(r.dpp, " pp") },
-          { key: "daily", label: "Trend", title: `Daily SR, ${mSpan}`, render: (r) => (r._total ? "" : <Spark values={r.daily} color="#94a3b8" />), text: () => "" },
+          { key: "daily", label: "Trend", title: `Daily SR, ${mSpan}`, render: (r) => (r._total ? "" : <Spark values={r.daily} days={mDays} name={rowName(r)} metric="SR" unit="pct" color="#94a3b8" />), text: () => "" },
         ]}
         rows={has("mandate") ? [...mand.items.map((i) => ({ ...i, _active: catSel.includes(i.cat), _onClick: () => toggle(catPick, setCatPick, catDefault, i.cat) })), mand.total] : []}
         tableMaxHeight={420}
@@ -1896,7 +1922,7 @@ function RefundsView({ cached, job, range, codeInfo, onShowSql, onRun, onStop })
               text: (r) => fmtPct(banks.srOf(r.bank, d)),
             }))
           : []),
-        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={ppToneOf(r.dpp) === C.text2 ? "#94a3b8" : ppToneOf(r.dpp)} curFrom={curFrom} />, text: () => "" },
+        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color={ppToneOf(r.dpp) === C.text2 ? "#94a3b8" : ppToneOf(r.dpp)} curFrom={curFrom} />, text: () => "" },
       ]
     : [];
 
@@ -2037,7 +2063,7 @@ function PayoutsView({ cached, job, range, codeInfo, onShowSql, onRun, onStop })
         { key: "psr", label: "Prev SR", title: prevLabel, render: (r) => fmtPct(r.psr, 2) },
         { key: "dpp", label: "Δ pp", render: (r) => <span style={{ color: ppToneOf(r.dpp) }}>{fmtSigned(r.dpp, " pp", 2)}</span>, text: (r) => fmtSigned(r.dpp, " pp", 2) },
         { key: "amt", label: "Amount ₹", render: (r) => fmtInr(r.amt) },
-        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={r.color} curFrom={curFrom} />, text: () => "" },
+        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color={r.color} curFrom={curFrom} />, text: () => "" },
       ]
     : [];
   const typeLabel = typeSel === "all" ? "all business types" : typeSel;
@@ -2291,7 +2317,7 @@ function IccwView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }) {
     { key: "psr", label: "Prev SR", title: prevLabel, render: (r) => fmtPct(r.psr, 2) },
     { key: "dpp", label: "Δ pp", render: (r) => <span style={{ color: ppToneOf(r.dpp) }}>{fmtSigned(r.dpp, " pp", 2)}</span>, text: (r) => fmtSigned(r.dpp, " pp", 2) },
     { key: "samt", label: "Cash withdrawn ₹", render: (r) => fmtInr(r.samt) },
-    { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color="#94a3b8" curFrom={curFrom} />, text: () => "" },
+    { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color="#94a3b8" curFrom={curFrom} />, text: () => "" },
   ];
   const dimLabel = ICCW_DIMS.find(([d]) => d === dim)?.[1] || dim;
   const splitCols = [
@@ -2303,7 +2329,7 @@ function IccwView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }) {
     { key: "dpp", label: "Δ pp", render: (r) => <span style={{ color: ppToneOf(r.dpp) }}>{fmtSigned(r.dpp, " pp", 2)}</span>, text: (r) => fmtSigned(r.dpp, " pp", 2) },
     { key: "ysr", label: `SR ${fmtDay(y)}`, title: `Latest day (${fmtDay(y)}) · ${"attempts below"}`, render: (r) => <div>{fmtPct(r.ysr, 2)}<div style={{ fontSize: 11, color: C.muted }}>{fmtNum(r.yatt)}</div></div>, text: (r) => fmtPct(r.ysr, 2) },
     { key: "samt", label: "Cash withdrawn ₹", render: (r) => fmtInr(r.samt) },
-    { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={r.flag ? C.bad : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
+    { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color={r.flag ? C.bad : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
   ];
   const codeCols = [
     {
@@ -2329,7 +2355,7 @@ function IccwView({ cached, job, range, codeInfo, onShowSql, onRun, onStop }) {
     { key: "d2", label: "D-1", title: "Day before", render: (r) => fmtNum(r.d2) },
     { key: "avg", label: "L7D avg", title: "Daily average of the 7 days before", render: (r) => fmtNum(r.avg) },
     { key: "vsAvg", label: "vs avg", render: (r) => <span style={{ color: ppToneOf(r.vsAvg == null ? null : -r.vsAvg), fontWeight: r.flag ? 700 : 400 }}>{fmtSigned(r.vsAvg, "%", 0)}</span>, text: (r) => fmtSigned(r.vsAvg, "%", 0) },
-    { key: "trend", label: "Daily", title: `Daily count, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={r.flag ? C.bad : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
+    { key: "trend", label: "Daily", title: `Daily count, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="Count" unit="count" upIsBad color={r.flag ? C.bad : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
   ];
   const drillCols = (label, base) => [
     { key: "k", label, align: "left", render: (r) => (base === "PAYEE_HANDLE" && r.k !== "Other" ? `@${r.k}` : r.k), text: (r) => r.k },
@@ -2743,7 +2769,7 @@ function IntlDeepDive({ cache, jobs, P, handleSel, codeInfo, notes, onShowSql, o
     { key: "failShare", label: "% of failures", render: (r) => fmtPct(r.failShare) },
     { key: "famt", label: "Failed ₹", render: (r) => fmtInr(r.famt) },
     { key: "medFail", label: "Median failed ₹", title: "Count-weighted median of the daily medians of failed amounts", render: (r) => fmtInr(r.medFail) },
-    { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color="#94a3b8" curFrom={curFrom} />, text: () => "" },
+    { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color="#94a3b8" curFrom={curFrom} />, text: () => "" },
   ];
   const descOf = (c) => {
     const i = codeInfo?.[c];
@@ -2781,7 +2807,7 @@ function IntlDeepDive({ cache, jobs, P, handleSel, codeInfo, notes, onShowSql, o
     { key: "famt", label: "₹", render: (r) => fmtInr(r.famt) },
     { key: "medFail", label: "Median ₹", render: (r) => fmtInr(r.medFail) },
     { key: "countries", label: "Top countries", align: "left", render: (r) => <span style={{ fontSize: 12 }}>{r.countries.map(([c, n]) => `${COUNTRY_NAME[c] || c} ${fmtNum(n)}`).join(", ")}</span>, text: (r) => r.countries.map(([c, n]) => `${c} ${n}`).join(", ") },
-    { key: "daily", label: "Daily", render: (r) => <Spark values={r.daily} color={r.trend.kind === "up" || r.trend.kind === "new" ? C.bad : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
+    { key: "daily", label: "Daily", render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="Count" unit="count" upIsBad color={r.trend.kind === "up" || r.trend.kind === "new" ? C.bad : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
   ];
   const reasonCols = [
     { key: "reason", label: "Reason", align: "left", wrap: true, render: (r) => <span><code>{r.reason}</code>{REASON_LABEL[r.reason] && <span style={{ fontSize: 11, color: C.text2 }}> · {REASON_LABEL[r.reason]}</span>}{descOf(r.reason) && <div style={{ fontSize: 11, color: C.text2 }}>{descOf(r.reason)}</div>}</span>, text: (r) => r.reason },
@@ -4086,7 +4112,7 @@ function MandatesView({ cached, job, range, asOf, codeInfo, onShowSql, onRun, on
     { key: "cc", label: "CC SR", render: (r) => fmtPct(r.cc, 2) },
     { key: "casa", label: "CASA SR", render: (r) => fmtPct(r.casa, 2) },
     { key: "gap", label: "CASA − CC", title: "CASA SR minus CC SR, percentage points", render: (r) => fmtSigned(r.gap, " pp", 2) },
-    { key: "daily", label: "Daily SR", title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={ppToneOf(r.dpp) === C.text2 ? "#94a3b8" : ppToneOf(r.dpp)} curFrom={curFrom} />, text: () => "" },
+    { key: "daily", label: "Daily SR", title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color={ppToneOf(r.dpp) === C.text2 ? "#94a3b8" : ppToneOf(r.dpp)} curFrom={curFrom} />, text: () => "" },
   ];
   const dayCols = [
     { key: "d", label: "Date", align: "left", render: (r) => (r._total ? "Total" : fmtDay(r.d)), text: (r) => (r._total ? "Total" : r.d) },
@@ -4173,7 +4199,7 @@ function MandatesView({ cached, job, range, asOf, codeInfo, onShowSql, onRun, on
             text: (r) => (r.vsMed == null ? "" : fmtSigned(r.vsMed, "%", 0)),
           },
         ]
-      : [{ key: "daily", label: "Daily % of attempts", noSort: true, title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={r.trend.kind === "up" || r.trend.kind === "new" ? C.bad : r.trend.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />, text: () => "" }]),
+      : [{ key: "daily", label: "Daily % of attempts", noSort: true, title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="% of attempts" unit="pct" upIsBad color={r.trend.kind === "up" || r.trend.kind === "new" ? C.bad : r.trend.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />, text: () => "" }]),
     ...(acct === "all"
       ? [
           { key: "cc", label: "CC", title: `CC failures, ${curLabel}`, render: (r) => fmtNum(r.cc) },
@@ -4229,7 +4255,7 @@ function MandatesView({ cached, job, range, asOf, codeInfo, onShowSql, onRun, on
             },
           ];
         })()
-      : [{ key: "daily", label: "Daily SR", noSort: true, title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} color={ppToneOf(r.dpp) === C.text2 ? "#94a3b8" : ppToneOf(r.dpp)} curFrom={curFrom} />, text: () => "" }]),
+      : [{ key: "daily", label: "Daily SR", noSort: true, title: `${prevLabel} → ${curLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color={ppToneOf(r.dpp) === C.text2 ? "#94a3b8" : ppToneOf(r.dpp)} curFrom={curFrom} />, text: () => "" }]),
     ...(splitDim === "PAYER_BANK"
       ? [
           {
@@ -4955,7 +4981,7 @@ export default function ProductDashboard() {
         { key: "psr", label: "Prev SR", title: prevLabel, render: (r) => fmtPct(r.psr) },
         { key: "dpp", label: "Δ pp", title: "SR change vs previous period, percentage points", render: (r) => <span style={{ color: ppTone(r.dpp), fontWeight: Math.abs(r.dpp || 0) >= 2 ? 700 : 400 }}>{fmtSigned(r.dpp, " pp")}</span>, text: (r) => fmtSigned(r.dpp, " pp") },
         ...(showDayCols ? P.cur.map((d) => ({ key: d, label: fmtDay(d), render: (r) => (r._total ? "" : srCell(s2.srOf(r.bank, d), s2.overall)), text: (r) => (r._total ? "" : fmtPct(s2.srOf(r.bank, d))) })) : []),
-        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} color={ppTone(r.dpp) === C.text2 ? "#94a3b8" : ppTone(r.dpp)} curFrom={curFrom} />), text: () => "" },
+        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color={ppTone(r.dpp) === C.text2 ? "#94a3b8" : ppTone(r.dpp)} curFrom={curFrom} />), text: () => "" },
       ]
     : [];
   const s2Rows = s2
@@ -5002,7 +5028,7 @@ export default function ProductDashboard() {
         { key: "share", label: "% of non-success", render: (r) => fmtPct(r.share) },
         { key: "prev", label: "Prev", title: prevLabel, render: (r) => fmtNum(r.prev) },
         { key: "trend", label: "vs Prev", title: `Failed count vs previous period (${prevLabel}); ±${TREND_PCT}% flagged`, render: (r) => <TrendBadge t={r.trend} />, text: (r) => (r.trend.kind === "new" ? "NEW" : fmtSigned(r.trend.pct, "%", 0)) },
-        { key: "daily", label: "Daily", title: `Daily failures, ${prevLabel} → ${periodLabel}`, render: (r) => <Spark values={r.daily} color={r.trend.kind === "up" || r.trend.kind === "new" ? C.bad : r.trend.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
+        { key: "daily", label: "Daily", title: `Daily failures, ${prevLabel} → ${periodLabel}`, render: (r) => <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="Failures" unit="count" upIsBad color={r.trend.kind === "up" || r.trend.kind === "new" ? C.bad : r.trend.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />, text: () => "" },
         { key: "banks", label: "Top payer banks", align: "left", render: (r) => <span style={{ fontSize: 12 }}>{r.banks.map(([b, c]) => `${b} ${fmtNum(c)}`).join(", ")}</span>, text: (r) => r.banks.map(([b, c]) => `${b} ${c}`).join(", ") },
         ...(handleSel === "all"
           ? [{ key: "psps", label: "PSP split", align: "left", render: (r) => <span style={{ fontSize: 12 }}>{r.psps.map(([h, c]) => `${h} ${fmtPct(pct(c, r.c), 0)}`).join(", ")}</span>, text: (r) => r.psps.map(([h, c]) => `${h} ${fmtPct(pct(c, r.c), 0)}`).join(", ") }]
@@ -5034,7 +5060,7 @@ export default function ProductDashboard() {
         { key: "d2sr", label: "D-2 SR", title: qd2, render: (r) => fmtPct(r.d2sr) },
         { key: "l7sr", label: "L7D SR", title: `Pooled SR over ${ql7}`, render: (r) => fmtPct(r.l7sr) },
         { key: "dpp", label: "vs L7D", title: "Yesterday SR − L7D SR, percentage points", render: (r) => <span style={{ color: ppTone(r.dpp), fontWeight: Math.abs(r.dpp || 0) >= 2 ? 700 : 400 }}>{fmtSigned(r.dpp, " pp")}</span>, text: (r) => fmtSigned(r.dpp, " pp") },
-        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} color={ppTone(r.dpp) === C.text2 ? "#94a3b8" : ppTone(r.dpp)} curFrom={curFrom} />), text: () => "" },
+        { key: "trend", label: "Trend", title: `Daily SR, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="SR" unit="pct" color={ppTone(r.dpp) === C.text2 ? "#94a3b8" : ppTone(r.dpp)} curFrom={curFrom} />), text: () => "" },
       ]
     : [];
   const s5Rows = s5 ? [...s5.items.map((i) => ({ ...i, _active: countrySel.includes(i.country), _onClick: () => toggle(countryPick, setCountryPick, countryDefault, i.country) })), s5.total] : [];
@@ -5049,7 +5075,7 @@ export default function ProductDashboard() {
         { key: "l7avg", label: "L7D Avg / Day", title: ql7, render: (r) => (r.l7avg ? r.l7avg.toFixed(1) : "0") },
         { key: "vsL7", label: "vs L7D Avg", title: `Yesterday vs L7D daily average; ±${TREND_PCT}% flagged`, render: (r) => <TrendBadge t={r.vsL7} />, text: (r) => (r.vsL7.kind === "new" ? "NEW" : fmtSigned(r.vsL7.pct, "%", 0)) },
         { key: "vsD2", label: "vs D-2", title: `Yesterday vs D-2; ±${TREND_PCT}% flagged`, render: (r) => <TrendBadge t={r.vsD2} />, text: (r) => (r.vsD2.kind === "new" ? "NEW" : fmtSigned(r.vsD2.pct, "%", 0)) },
-        { key: "daily", label: "Daily", title: `Daily failures, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} color={r.vsL7.kind === "up" || r.vsL7.kind === "new" ? C.bad : r.vsL7.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />), text: () => "" },
+        { key: "daily", label: "Daily", title: `Daily failures, ${prevLabel} → ${periodLabel}`, render: (r) => (r._total ? "" : <Spark values={r.daily} days={P.chart} name={rowName(r)} metric="Failures" unit="count" upIsBad color={r.vsL7.kind === "up" || r.vsL7.kind === "new" ? C.bad : r.vsL7.kind === "down" ? C.good : "#94a3b8"} curFrom={curFrom} />), text: () => "" },
       ]
     : [];
   const s6Rows = s6 ? [...s6.items, s6.total] : [];

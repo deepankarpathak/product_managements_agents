@@ -2159,7 +2159,7 @@ export function registerProductDashboard(app, { dataDir, history = null }) {
       const prevAvg = prev.length ? prev.reduce((a, v) => a + v, 0) / prev.length : null;
       const value = val(day);
       const delta = value == null || prevAvg == null ? null : kind === "sr" ? value - prevAvg : prevAvg ? (100 * (value - prevAvg)) / prevAvg : null;
-      return { day, value, volume: m.get(day).d, prevAvg, delta, series: days.slice(-14).map(val) };
+      return { day, value, volume: m.get(day).d, prevAvg, delta, series: days.slice(-14).map(val), seriesDays: days.slice(-14) };
     };
     const ok = (s) => (s === "SUCCESS" ? 1 : 0);
     const meta = (p, qs) => {

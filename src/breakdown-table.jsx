@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ALERT_RULES, buildBreakdown } from "./breakdown-math.mjs";
 import { NO_PICK, Picker, applyPick, toPick, useStored } from "./table-pickers.jsx";
+import { Zoomable } from "./trend-zoom.jsx";
 
 // BreakdownTable — impact-ranked SR triage table (one dimension at a time).
 // Shared by SR Snippet and Morning Dashboard. All math lives in breakdown-math.mjs
@@ -445,7 +446,25 @@ export default function BreakdownTable({
               style={td}
               title={days.trend.map((d, i) => `${fmtDay(d)}: ${fmtNum(r.focusTrend[i])}${r.totalByDay[d] ? ` (${((r.focusTrend[i] * 100) / r.totalByDay[d]).toFixed(2)}% of txns)` : ""}`).join("\n")}
             >
-              <Spark values={r.focusTrend} />
+              <Zoomable
+                block
+                title={`Click to zoom — ${focus} failures per day`}
+                spec={() => {
+                  const who = isOverall ? "Overall" : nameOf(r.dim) || r.dim;
+                  const kindLabel = kinds.find((k) => k.id === kind)?.label || kind;
+                  const base = { title: `${focus} failures · ${who}`, subtitle: isOverall ? kindLabel : `${kindLabel} ${r.dim}`, days: days.trend, upIsBad: true };
+                  const cnt = { ...base, lines: [{ name: `${focus} fails`, color: C.warn, values: r.focusTrend }], fmt: fmtNum, unit: "count" };
+                  const share = {
+                    ...base,
+                    lines: [{ name: "% of txns", color: C.warn, values: days.trend.map((d, i) => (r.totalByDay?.[d] ? (r.focusTrend[i] * 100) / r.totalByDay[d] : null)) }],
+                    fmt: (v) => (v == null ? "—" : `${v.toFixed(3)}%`),
+                    unit: "pct",
+                  };
+                  return { ...cnt, variants: r.totalByDay ? [{ id: "cnt", label: "Failures", spec: cnt }, { id: "pct", label: "% of txns", spec: share }] : undefined };
+                }}
+              >
+                <Spark values={r.focusTrend} />
+              </Zoomable>
             </td>
           </>
         )}
