@@ -181,7 +181,11 @@ Opening a view never queries Redash; everything comes from stored slots.
 **Collection and slave protection**
 
 - `recent:C2|C3|C6` read each 10-min slot 5 min after it ends and once more at 20 min (settle). A slot not read within 45 min is left for the night.
-- `night` (01:00–06:00 IST, `ACQ_NIGHT_WINDOW`) fills missing slots newest first, C2 / C3 / C6 in lockstep (one query per host at a time), under a DB-minute budget. Plan a deeper fill for one night: `curl -s -XPOST localhost:5000/api/acq/night/plan -H 'content-type: application/json' -d '{"fillTo":"2026-11-06 00:00","budgetMin":900,"openAt":"23:00"}'` — `openAt` (12:00 or later, optional) starts that one night early; the standing window is unchanged. Budget cap 900.
+- `night` (01:00–06:00 IST, `ACQ_NIGHT_WINDOW`) fills missing slots newest first, C2 / C3 / C6 in lockstep (one query per host at a time), under a DB-minute budget (default 600 min for all clusters, `ACQ_NIGHT_BUDGET_MIN` per cluster). **Every night, automatically**, newest first:
+  1. all gaps of the last 2 days (`ACQ_NIGHT_DAYS`) — the day that just ended, the day before it — and today so far (the night of 13→14 Nov covers 12, 13 and 14 Nov);
+  2. **history backfill**: the 2 days (`ACQ_DEEP_DAYS`, `0` = off) before the oldest complete day (all clusters, 144 slots). Oldest complete 6 Nov → that night fills 5 and 4 Nov; the target is fixed when the night starts, and whatever is left carries over to the next night. Never older than the retention window.
+
+  Gaps older than both are counted on the page and wait for a plan or the trickle. Plan a deeper fill for one night: `curl -s -XPOST localhost:5000/api/acq/night/plan -H 'content-type: application/json' -d '{"fillTo":"2026-11-06 00:00","budgetMin":900,"openAt":"23:00"}'` — `openAt` (12:00 or later, optional) starts that one night early; the standing window is unchanged. Budget cap 900.
 - `trickle` (daytime, optional) reads one old cluster-slot per chunk in 1-min pieces (≤15 s each), only while the queue is idle, up to a daily DB budget: `POST /api/acq/trickle {"fillTo","budgetMin","everyMin"}` or `{"off":true}`.
 - Every query carries a MySQL time limit (20 s day, 60 s night). A slow or stopped query rests the queue 10 min; a stopped trickle piece pauses only the trickle for 30 min.
 - `ppsl` (PMS full-table scan) runs only between 01:00 and 06:00 IST, even if the night window is moved earlier.

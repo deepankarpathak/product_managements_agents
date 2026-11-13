@@ -76,7 +76,14 @@ const TRICKLE_HOLD_MIN = Number(process.env.ACQ_TRICKLE_HOLD_MIN) || 30;
 const NIGHT_DUTY_REST = process.env.ACQ_NIGHT_DUTY_REST != null ? Number(process.env.ACQ_NIGHT_DUTY_REST) : 0.5;
 // Cold reads cost ~80 s of DB time per 10-min slot (C3, measured 9 Nov) whatever the split, so night work is
 // capped at this much DB time per cluster per night (final re-reads, then gaps newest first, then backfill).
-const NIGHT_BUDGET_MIN = process.env.ACQ_NIGHT_BUDGET_MIN != null ? Number(process.env.ACQ_NIGHT_BUDGET_MIN) : 15;
+const NIGHT_BUDGET_MIN = process.env.ACQ_NIGHT_BUDGET_MIN != null ? Number(process.env.ACQ_NIGHT_BUDGET_MIN) : 200;
+// Standing nightly rule: every night fills every missing slot of the last ACQ_NIGHT_DAYS days — the day that just
+// ended, the day before it, and today so far — newest first. Older gaps only with a night plan (fillTo) or the trickle.
+const NIGHT_DAYS = Number(process.env.ACQ_NIGHT_DAYS) || 2;
+// Rolling history backfill: each night also reads the ACQ_DEEP_DAYS days before the oldest complete day (all
+// clusters, all 144 slots) — e.g. oldest complete 6 Nov → that night fills 5 and 4 Nov. Fixed when the night starts;
+// what is left carries over. Never older than the retention window. 0 = off.
+const DEEP_DAYS = process.env.ACQ_DEEP_DAYS != null ? Number(process.env.ACQ_DEEP_DAYS) : 2;
 // Slave-safe default (agreed 9 Nov 2026): no deep backfill and no 12h final re-read — an old slot costs ~80 s of
 // slave DB time. History builds forward from the first run; the settle read is final. Re-enable with
 // ACQ_BACKFILL_DAYS=<n> / ACQ_FINAL_REREAD=true (both run in the night window under the night budget).
@@ -932,11 +939,28 @@ export function createAcqCollector({ dataDir }) {
       .sort();
     return hms.length ? stampMs(`${d} ${hms[0]}:00`) : null;
   }
+  // 00:00 IST of the first of the last NIGHT_DAYS days, counted back from the night's date (the evening it starts):
+  // the night of 13→14 Nov covers 12 Nov, 13 Nov (just ended) and 14 Nov so far.
+  const autoFloor = () => stampMs(`${istStamp(stampMs(`${nightKey()} 00:00:00`) - (NIGHT_DAYS - 1) * 86400000).slice(0, 10)} 00:00:00`);
+  const SLOTS_PER_DAY = (24 * 60) / SLOT_MIN;
+  const dayComplete = (d) => {
+    const day = dayOf(d);
+    return !!day && CL_IDS.every((cl) => (day.slots?.[cl] || 0) >= SLOTS_PER_DAY);
+  };
+  /** Oldest complete day and the deep floor DEEP_DAYS before it (null when off / nothing complete yet). */
+  function deepTarget() {
+    if (!DEEP_DAYS) return null;
+    const from = allDays().find(dayComplete);
+    if (!from) return null;
+    let floor = stampMs(`${from} 00:00:00`) - DEEP_DAYS * 86400000;
+    if (RETENTION_DAYS > 0) floor = Math.max(floor, todayStartMs() - (RETENTION_DAYS - 1) * 86400000);
+    return { from, floor };
+  }
+  // Fixed for the whole night once it starts, so finishing a day mid-night does not move the target further back.
+  const deepFloor = () => (state.nightDeep?.night === nightKey() ? state.nightDeep.floor : (deepTarget()?.floor ?? null));
   const fillFloor = () => {
     const p = nightPlan();
-    const first = firstReadSlot();
-    if (p?.fillTo) return Math.min(stampMs(`${p.fillTo}:00`), first ?? Infinity);
-    return first;
+    return Math.min(autoFloor(), deepFloor() ?? Infinity, p?.fillTo ? stampMs(`${p.fillTo}:00`) : Infinity);
   };
   // Younger slots belong to the recent:* jobs (still hot).
   const fillTop = () => Math.min(floorSlot(Date.now() - HOT_MAX_MIN * 60000), ...CL_IDS.map((cl) => state.clusters[cl]?.head ?? Infinity));
@@ -959,9 +983,30 @@ export function createAcqCollector({ dataDir }) {
       newest: steps[0]?.s ?? null,
       oldest: steps.at(-1)?.s ?? null,
       floor: fillFloor(),
+      nightDays: NIGHT_DAYS,
+      deep: DEEP_DAYS
+        ? (() => {
+            const fixed = state.nightDeep?.night === nightKey() ? state.nightDeep : null;
+            const t = fixed || deepTarget();
+            return t?.floor != null ? { days: DEEP_DAYS, from: t.from, to: istStamp(t.floor).slice(0, 10), fixed: !!fixed } : { days: DEEP_DAYS, from: null, to: null };
+          })()
+        : null,
+      // Gaps older than the floor (since the first stored slot): left for a night plan or the trickle.
+      olderSlots: (() => {
+        const first = firstReadSlot();
+        const floor = fillFloor();
+        if (first == null || first >= floor) return 0;
+        let n = 0;
+        for (let s = floor - SLOT_MS; s >= first; s -= SLOT_MS) n += CL_IDS.filter((cl) => !slotRead(cl, s)).length;
+        return n;
+      })(),
     };
   }
   async function runNight(ctx) {
+    if (state.nightDeep?.night !== nightKey()) {
+      const t = deepTarget();
+      state.nightDeep = { night: nightKey(), floor: t?.floor ?? null, from: t?.from ?? null };
+    }
     ctx.maxSec = DB_MAX_NIGHT_SEC;
     ctx.slowMs = DB_MAX_NIGHT_SEC * 1000;
     ctx.parts = ctx.test?.parts || NIGHT_PARTS;
@@ -1334,7 +1379,6 @@ export function createAcqCollector({ dataDir }) {
       hotMaxMin: HOT_MAX_MIN,
       finalsPending: Object.keys(CLUSTERS).reduce((n, cl) => n + rereadsDue(cl).final.length, 0),
       nightParts: NIGHT_PARTS,
-      nightBudgetMin: NIGHT_BUDGET_MIN,
       nightPlan: nightPlan(),
       nightBudgetMin: Math.round(budgetMs() / 60000),
       nightUsedMin: Math.round(nightUsedMs() / 6000) / 10,

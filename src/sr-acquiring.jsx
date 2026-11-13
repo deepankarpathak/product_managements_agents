@@ -715,11 +715,13 @@ function QueryControl({ status, err, onAction }) {
         {stat("Data updated to", heads[0] ? `${heads[0].slice(11)} · ${heads[0].slice(5, 10)}` : "—", `slots read ${cov.lagMin} min after they end`)}
         {stat("Last slot read", ago(status.lastSlotAt), `${fmtNum(status.slotsRead)} slots since backend start`)}
         {stat(
-          cov.nightPlan ? `Night fill → ${cov.nightPlan.fillTo || "holes"}` : "Night fill (holes only)",
+          cov.nightPlan?.fillTo
+            ? `Night fill → ${cov.nightPlan.fillTo}`
+            : `Night fill · last ${cov.night?.nightDays || 2} days${cov.night?.deep?.to ? ` + history to ${cov.night.deep.to.slice(5)}` : ""}`,
           `${fmtNum(cov.night?.slots || 0)} slots · ${fmtNum(cov.night?.steps || 0)} steps`,
           cov.night?.slots
             ? `${cov.inNight ? "filling now" : `starts ${hhmm(cov.nextNightAt)}`} · ${cov.nightUsedMin}/${cov.nightBudgetMin} min DB used · C2 ${cov.night.byCluster.C2} · C3 ${cov.night.byCluster.C3} · C6 ${cov.night.byCluster.C6}`
-            : "nothing missing",
+            : `nothing missing${cov.night?.olderSlots ? ` · ${fmtNum(cov.night.olderSlots)} older slots wait for a plan or the trickle` : ""}`,
         )}
         {cov.trickle?.on &&
           stat(
@@ -842,7 +844,7 @@ function QueryControl({ status, err, onAction }) {
             {cov.nightWindow || "off"} IST
             {cov.inNight ? ", running now" : cov.nextNightAt ? `, next ${hhmm(cov.nextNightAt)}` : ""}).
             {cov.nightBudgetMin != null
-              ? ` The night job reads C2, C3 and C6 in lockstep — the same 10-min slot on each (side by side: separate hosts, one query per host, resting half as long as each query ran) before the next one back, newest missing first${cov.nightPlan?.fillTo ? `, down to ${cov.nightPlan.fillTo}` : " (holes only)"} — in ${cov.slotMin / cov.nightParts}-min pieces, within ${cov.nightBudgetMin} min of DB time for all clusters together (used tonight: ${cov.nightUsedMin} min — ${Object.entries(
+              ? ` The night job reads C2, C3 and C6 in lockstep — the same 10-min slot on each (side by side: separate hosts, one query per host, resting half as long as each query ran) before the next one back, newest missing first, every night over the last ${cov.night?.nightDays || 2} days and today so far, then ${cov.night?.deep?.days || 0} older days before the oldest complete day${cov.night?.deep?.from ? ` (${cov.night.deep.from} → down to ${cov.night.deep.to})` : ""}${cov.nightPlan?.fillTo ? ` (tonight down to ${cov.nightPlan.fillTo})` : ""} — in ${cov.slotMin / cov.nightParts}-min pieces, within ${cov.nightBudgetMin} min of DB time for all clusters together (used tonight: ${cov.nightUsedMin} min — ${Object.entries(
                   cov.nightUsedByCluster || {},
                 )
                   .map(([k, v]) => `${k} ${v}`)
